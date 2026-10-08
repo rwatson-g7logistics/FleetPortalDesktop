@@ -1,0 +1,291 @@
+"""
+views/service_form.py
+---------------------
+Service Logging & Maintenance Entry View for G7 Fleet Portal Desktop.
+Provides dynamic service categorization, shop/vendor selection, component wear tracking,
+and automated inventory deduction triggers.
+"""
+
+from typing import List, Dict, Any, Optional
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+    QPushButton, QComboBox, QDoubleSpinBox, QSpinBox, QTextEdit,
+    QCheckBox, QGroupBox, QFileDialog, QMessageBox, QFrame, QScrollArea
+)
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFont
+
+from db_manager import DatabaseManager
+# utils imports
+from utils.platform_helper import get_app_data_directory, get_default_font_family
+from utils.pdf_builder import create_service_report_pdf
+
+
+class ServiceFormView(QWidget):
+    """Interactive service logging form with dynamic tire inputs and auto-inventory triggers."""
+
+    # Signal emitted when a new service event is saved successfully
+    service_logged = Signal(str)
+
+    def __init__(self, db_manager: DatabaseManager, vehicle_data: Dict[str, Any], parent=None):
+        super().__init__(parent)
+        self.db = db_manager
+        self.vehicle = vehicle_data
+        self.selected_files: List[str] = []
+        self.init_ui()
+
+    def init_ui(self) -> None:
+        """Constructs the scrollable service entry form."""
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setStyleSheet("QScrollArea { border: none; background-color: #11111B; }")
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+
+        # Header Title
+        lbl_title = QLabel(f"🛠️ Log New Service Event — {self.vehicle.get('vehicle_id', 'Unknown')}")
+        lbl_title.setFont(QFont(get_default_font_family(), 16, QFont.Bold))
+        lbl_title.setStyleSheet("color: #89B4FA;")
+        layout.addWidget(lbl_title)
+
+        # --- 1. CORE SERVICE METRICS ---
+        grp_core = QGroupBox("1. Service Details & Cost")
+        grp_core.setStyleSheet("""
+            QGroupBox {
+                color: #CDD6F4;
+                font-weight: bold;
+                border: 1px solid #313244;
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 15px;
+            }
+            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
+        """)
+        core_layout = QVBoxLayout(grp_core)
+
+        # Row A: Date & Mileage
+        row_a = QHBoxLayout()
+        row_a.addWidget(QLabel("Date (MM/DD/YYYY):"))
+        self.txt_date = QLineEdit()
+        self.txt_date.setPlaceholderText("MM/DD/YYYY")
+        self.txt_date.setFixedHeight(35)
+        self.txt_date.setStyleSheet("background-color: #313244; color: #CDD6F4; border-radius: 6px; padding-left: 8px;")
+        row_a.addWidget(self.txt_date)
+
+        row_a.addWidget(QLabel("Service Mileage:"))
+        self.spin_mileage = QSpinBox()
+        self.spin_mileage.setRange(0, 1000000)
+        self.spin_mileage.setValue(int(self.vehicle.get('mileage', 0)))
+        self.spin_mileage.setFixedHeight(35)
+        self.spin_mileage.setStyleSheet("background-color: #313244; color: #CDD6F4; border-radius: 6px; padding-left: 8px;")
+        row_a.addWidget(self.spin_mileage)
+
+        core_layout.addLayout(row_a)
+
+        # Row B: Service Types (Checkboxes)
+        core_layout.addWidget(QLabel("Service Type(s) Performed:"))
+        types_layout = QHBoxLayout()
+        self.chk_type_a = QCheckBox("A Service (Oil/Filter/Rotation)")
+        self.chk_type_b = QCheckBox("B Service (Comprehensive)")
+        self.chk_tires = QCheckBox("Tires")
+        self.chk_brakes = QCheckBox("Brakes")
+        self.chk_repair = QCheckBox("General Repair / Other")
+
+        for chk in [self.chk_type_a, self.chk_type_b, self.chk_tires, self.chk_brakes, self.chk_repair]:
+            chk.setStyleSheet("color: #CDD6F4;")
+            types_layout.addWidget(chk)
+
+        self.chk_tires.toggled.connect(self.toggle_tire_section)
+        core_layout.addLayout(types_layout)
+
+        # Row C: Vendor & Invoice Details
+        row_c = QHBoxLayout()
+        row_c.addWidget(QLabel("Vendor / Shop:"))
+        self.cmb_vendor = QComboBox()
+        self.populate_vendors()
+        self.cmb_vendor.setFixedHeight(35)
+        self.cmb_vendor.setStyleSheet("background-color: #313244; color: #CDD6F4; border-radius: 6px; padding-left: 8px;")
+        row_c.addWidget(self.cmb_vendor, stretch=2)
+
+        row_c.addWidget(QLabel("Invoice #:"))
+        self.txt_invoice = QLineEdit()
+        self.txt_invoice.setFixedHeight(35)
+        self.txt_invoice.setStyleSheet("background-color: #313244; color: #CDD6F4; border-radius: 6px; padding-left: 8px;")
+        row_c.addWidget(self.txt_invoice, stretch=1)
+
+        row_c.addWidget(QLabel("Total Cost ($):"))
+        self.spin_cost = QDoubleSpinBox()
+        self.spin_cost.setRange(0.0, 50000.0)
+        self.spin_cost.setDecimals(2)
+        self.spin_cost.setFixedHeight(35)
+        self.spin_cost.setStyleSheet("background-color: #313244; color: #CDD6F4; border-radius: 6px; padding-left: 8px;")
+        row_c.addWidget(self.spin_cost, stretch=1)
+
+        core_layout.addLayout(row_c)
+        layout.addWidget(grp_core)
+
+        # --- 2. DYNAMIC TIRE DETAILS (EXPANDABLE) ---
+        self.grp_tires = QGroupBox("🛞 Dynamic Tire Details")
+        self.grp_tires.setVisible(False)
+        self.grp_tires.setStyleSheet(grp_core.styleSheet())
+        tire_layout = QVBoxLayout(self.grp_tires)
+
+        t_row = QHBoxLayout()
+        t_row.addWidget(QLabel("Tires Replaced:"))
+        self.spin_tire_cnt = QSpinBox()
+        self.spin_tire_cnt.setRange(1, 4)
+        self.spin_tire_cnt.setValue(2)
+        self.spin_tire_cnt.setFixedHeight(35)
+        self.spin_tire_cnt.setStyleSheet("background-color: #313244; color: #CDD6F4; border-radius: 6px; padding-left: 8px;")
+        t_row.addWidget(self.spin_tire_cnt)
+
+        t_row.addWidget(QLabel("Positions Changed:"))
+        self.chk_pos_df = QCheckBox("Driver Front (DF)")
+        self.chk_pos_pf = QCheckBox("Passenger Front (PF)")
+        self.chk_pos_dr = QCheckBox("Driver Rear (DR)")
+        self.chk_pos_pr = QCheckBox("Passenger Rear (PR)")
+
+        for pos in [self.chk_pos_df, self.chk_pos_pf, self.chk_pos_dr, self.chk_pos_pr]:
+            pos.setStyleSheet("color: #CDD6F4;")
+            t_row.addWidget(pos)
+
+        tire_layout.addLayout(t_row)
+        layout.addWidget(self.grp_tires)
+
+        # --- 3. REPAIR DETAILS & ATTACHMENTS ---
+        grp_details = QGroupBox("2. Technical Description & Files")
+        grp_details.setStyleSheet(grp_core.styleSheet())
+        details_layout = QVBoxLayout(grp_details)
+
+        details_layout.addWidget(QLabel("Reported Issue (What went wrong?):"))
+        self.txt_issue = QTextEdit()
+        self.txt_issue.setFixedHeight(60)
+        self.txt_issue.setStyleSheet("background-color: #313244; color: #CDD6F4; border-radius: 6px;")
+        details_layout.addWidget(self.txt_issue)
+
+        details_layout.addWidget(QLabel("Repair Performed (What was fixed/replaced?):"))
+        self.txt_repair = QTextEdit()
+        self.txt_repair.setFixedHeight(60)
+        self.txt_repair.setStyleSheet("background-color: #313244; color: #CDD6F4; border-radius: 6px;")
+        details_layout.addWidget(self.txt_repair)
+
+        # Attachments Button
+        btn_files = QPushButton("📎 Attach Invoice PDFs / Photos")
+        btn_files.setFixedHeight(35)
+        btn_files.setStyleSheet("background-color: #45475A; color: #CDD6F4; border-radius: 6px;")
+        btn_files.clicked.connect(self.attach_files)
+        details_layout.addWidget(btn_files)
+
+        self.lbl_files = QLabel("No files attached.")
+        self.lbl_files.setStyleSheet("color: #A6ADC8; font-size: 11px;")
+        details_layout.addWidget(self.lbl_files)
+
+        layout.addWidget(grp_details)
+
+        # --- 4. SUBMIT BUTTON ---
+        btn_submit = QPushButton("💾 Save & Archive Service Record")
+        btn_submit.setFixedHeight(45)
+        btn_submit.setFont(QFont(get_default_font_family(), 11, QFont.Bold))
+        btn_submit.setStyleSheet("background-color: #A6E3A1; color: #11111B; border-radius: 8px;")
+        btn_submit.clicked.connect(self.save_service_log)
+        layout.addWidget(btn_submit)
+
+        scroll_area.setWidget(container)
+        main_layout.addWidget(scroll_area)
+
+    def toggle_tire_section(self, checked: bool) -> None:
+        """Dynamically shows or hides the tire specification group box."""
+        self.grp_tires.setVisible(checked)
+
+    def populate_vendors(self) -> None:
+        """Loads vendor choices into the dropdown from local SQLite cache."""
+        vendors = self.db.get_vendor_list()
+        self.cmb_vendor.clear()
+        self.cmb_vendor.addItems(vendors if vendors else ["In-House Shop", "Mavis Tire & Auto", "Take 5"])
+
+    def attach_files(self) -> None:
+        """Opens native OS file dialog for selecting invoice PDFs or repair photos."""
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Select Service Invoices/Photos", "", "Documents & Images (*.pdf *.png *.jpg *.jpeg *.heic)"
+        )
+        if files:
+            self.selected_files = files
+            self.lbl_files.setText(f"Attached {len(files)} file(s): " + ", ".join([f.split('/')[-1] for f in files]))
+
+    def save_service_log(self) -> None:
+        """Validates input fields, persists service record to SQLite, and triggers auto-inventory deductions."""
+        # Build Service Type string
+        selected_types = []
+        if self.chk_type_a.isChecked(): selected_types.append("A Service")
+        if self.chk_type_b.isChecked(): selected_types.append("B Service")
+        if self.chk_tires.isChecked(): selected_types.append("Tires")
+        if self.chk_brakes.isChecked(): selected_types.append("Brakes")
+        if self.chk_repair.isChecked(): selected_types.append("Repair / Other")
+
+        svc_type_str = ", ".join(selected_types)
+        invoice = self.txt_invoice.text().strip()
+        issue = self.txt_issue.toPlainText().strip()
+        repair = self.txt_repair.toPlainText().strip()
+
+        # Strict Validation
+        if not selected_types or not invoice or not issue or not repair:
+            QMessageBox.critical(self, "Validation Error", "Service Type, Invoice #, Reported Issue, and Repair Performed are all mandatory.")
+            return
+
+        tire_cnt = self.spin_tire_cnt.value() if self.chk_tires.isChecked() else 0
+        
+        # Build Position String
+        pos_list = []
+        if self.chk_pos_df.isChecked(): pos_list.append("DF")
+        if self.chk_pos_pf.isChecked(): pos_list.append("PF")
+        if self.chk_pos_dr.isChecked(): pos_list.append("DR")
+        if self.chk_pos_pr.isChecked(): pos_list.append("PR")
+        pos_str = ", ".join(pos_list) if pos_list else "N/A"
+
+        # 1. Save to SQLite Database
+        service_data = {
+            "vehicle_id": self.vehicle.get('vehicle_id', ''),
+            "vin": self.vehicle.get('vin', ''),
+            "date": self.txt_date.text().strip(),
+            "service_type": svc_type_str,
+            "mileage": self.spin_mileage.value(),
+            "vendor": self.cmb_vendor.currentText(),
+            "invoice_num": invoice,
+            "cost": self.spin_cost.value(),
+            "notes": f"ISSUE: {issue}\nREPAIR: {repair}",
+            "tire_count": tire_cnt,
+            "tire_positions": pos_str
+        }
+
+        self.db.save_service_record(service_data)
+
+        # 2. Trigger Automatic Bulk Inventory Deductions
+        self.db.auto_deduct_inventory(
+            service_types=svc_type_str,
+            repair_text=f"{issue} {repair}",
+            tire_count=tire_cnt,
+            vehicle_make=self.vehicle.get('make', '')
+        )
+
+        # 3. Generate Single PDF Report with Attachments
+        report_dir = get_app_data_directory() / "Archived_Reports"
+        report_dir.mkdir(exist_ok=True)
+        
+        safe_vid = self.vehicle.get('vehicle_id', 'UNK')
+        safe_date = self.txt_date.text().strip().replace('/', '-')
+        pdf_filename = str(report_dir / f"ServiceReport_{safe_vid}_{safe_date}.pdf")
+        
+        try:
+            create_service_report_pdf(service_data, self.selected_files, pdf_filename)
+            msg = f"Service record logged and compiled into PDF!\n\nSaved to:\n{pdf_filename}"
+        except Exception as e:
+            msg = f"Service logged to database, but PDF compilation failed: {str(e)}"
+
+        QMessageBox.information(self, "Success", msg)
+        self.service_logged.emit(self.vehicle.get('vehicle_id', ''))

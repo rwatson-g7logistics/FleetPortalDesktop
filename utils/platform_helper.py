@@ -1,5 +1,5 @@
 """
-utils/platform_helper.py
+FleetPortalDesktop/utils/platform_helper.py
 ------------------------
 Platform utility helper for G7 Fleet Command Center Desktop.
 Handles OS identification, cross-platform path resolution, 

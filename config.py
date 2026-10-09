@@ -1,8 +1,8 @@
 """
-config.py
+FleetPortal/config.py
 ---------
 Configuration module for FleetPortal Desktop Application.
-Stores API scopes, Google Spreadsheet IDs, Drive Parent Folder IDs, 
+Stores API scopes, isolated Google Drive folder mappings,
 and local file paths used across the system.
 """
 
@@ -16,12 +16,24 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DB_PATH = DATA_DIR / "fleet_portal_cache.db"
 TOKEN_PATH = BASE_DIR / "token.json"
+CREDENTIALS_PATH = BASE_DIR / "credentials.json"
 
-# --- GOOGLE WORKSPACE CONFIGURATION ---
-SHEET_ID = "17P21L6idqNHodbUK3NuiuUn5dn8BfdmW4fn2jaHKoO8"
-USERS_SHEET_ID = "10oCsQAonC-8HKAQbB5Xl3dBHIghNAEVAovo50Y6HHSo"
-PARENT_FOLDER_ID = "14Yak5LLZwQi_Lk1u2rUfmrRe40MHe55f"
-DOCS_FOLDER_ID = "1clXwNSgF-LsWgJX8oEukz0me8ENR-mEH"
+# --- ISOLATED GOOGLE DRIVE HIERARCHY ---
+# Paste the folder ID from your FPD URL here:
+FPD_ROOT_FOLDER_ID = "1-YxQs5gmU5qQS3yCkBByAJ1oiYgHKbvl"
+
+# Dedicated Master Sheet name created inside the FPD root folder
+FPD_SHEET_NAME = "FPD_Master_Sheet"
+
+# Auto-provisioned subfolder directory names inside FPD
+SUBFOLDER_SERVICE_REPORTS = "Service Reports"
+SUBFOLDER_QR_CODES = "QR Codes"
+SUBFOLDER_PAVE = "PAVE Inspections"
+SUBFOLDER_DOCS = "Document Center"
+
+# --- SAFETY SWITCHES ---
+ENABLE_LIVE_WRITES = False
+STRICT_FOLDER_LOCK = True
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",

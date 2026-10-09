@@ -2,3 +2,14 @@ venv/
 __pycache__/
 *.pyc
 .DS_Store
+
+# Google Cloud & Local Auth Credentials (DO NOT COMMIT)
+token.json
+credentials.json
+
+# Local SQLite Cache & Temp Artifacts
+data/
+*.db
+PAVES/
+Archived_Reports/
+*.pdf

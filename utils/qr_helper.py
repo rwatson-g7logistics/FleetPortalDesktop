@@ -1,9 +1,9 @@
 """
-utils/qr_helper.py
+FleetPortalDesktop/utils/qr_helper.py
 ------------------
 QR Code generation and multi-page PDF grid export utilities.
 Uploads generated QR sheets directly to Google Drive (Cloud-first storage).
-Ensures strict VIN sanitization (stripping whitespace, control characters, ghost characters).
+Ensures strict VIN sanitization and displays clear sync/success/failure messages.
 """
 
 import re
@@ -12,15 +12,14 @@ import os
 from pathlib import Path
 from typing import List, Dict, Any
 import qrcode
+
 from PySide6.QtGui import QTextDocument
 from PySide6.QtPrintSupport import QPrinter
 from PySide6.QtWidgets import QMessageBox
 
-# Google API imports for cloud upload
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
-from cloud_sync import get_gcp_credentials
-from config import PARENT_FOLDER_ID
+# --- CLOUD INTEGRATION & CONFIGURATION IMPORTS ---
+from cloud_sync import upload_file_to_drive_sync
+from config import SUBFOLDER_QR_CODES
 
 
 def clean_vin(raw_vin: str) -> str:
@@ -38,7 +37,7 @@ def clean_vin(raw_vin: str) -> str:
 def export_grid_to_pdf(items: List[Dict[str, str]], default_filename: str, parent_widget=None) -> str:
     """
     Renders items into an HTML 4x4 CSS Grid table, compiles to a temporary PDF,
-    and uploads it directly to the Master User's Google Drive Cloud Storage.
+    and uploads it directly to the isolated FPD / QR Codes Google Drive folder.
     """
     # 1. Generate HTML Grid Content
     html = """
@@ -80,7 +79,8 @@ def export_grid_to_pdf(items: List[Dict[str, str]], default_filename: str, paren
         # Save QR chunk to temporary file
         fd, tmp_path = tempfile.mkstemp(suffix='.png')
         os.close(fd)
-        img_qr.save(tmp_path)
+        with open(tmp_path, "wb") as f_out:
+            img_qr.save(f_out)
         temp_files_to_cleanup.append(tmp_path)
 
         html += f"""
@@ -106,38 +106,22 @@ def export_grid_to_pdf(items: List[Dict[str, str]], default_filename: str, paren
     os.close(pdf_fd)
     temp_files_to_cleanup.append(pdf_path)
 
-    printer = QPrinter(QPrinter.HighResolution)
-    printer.setOutputFormat(QPrinter.PdfFormat)
+    printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+    printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
     printer.setOutputFileName(pdf_path)
 
     doc = QTextDocument()
     doc.setHtml(html)
     doc.print_(printer)
 
-    # 3. Upload directly to Master User's Google Drive
-    uploaded_file_url = ""
-    try:
-        creds = get_gcp_credentials()
-        if creds:
-            service = build('drive', 'v3', credentials=creds)
-            
-            file_metadata = {
-                'name': default_filename,
-                'parents': [PARENT_FOLDER_ID] if PARENT_FOLDER_ID else []
-            }
-            media = MediaFileUpload(pdf_path, mimetype='application/pdf', resumable=True)
-            
-            file = service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields='id, webViewLink, name'
-            ).execute()
-            
-            uploaded_file_url = file.get('webViewLink', '')
-    except Exception as e:
-        print(f"Cloud upload warning: {e}")
+    # 3. Upload to Google Drive into isolated FPD / QR Codes subfolder
+    success, web_link, err_msg = upload_file_to_drive_sync(
+        local_filepath=pdf_path,
+        drive_filename=default_filename,
+        subfolder_name=SUBFOLDER_QR_CODES
+    )
 
-    # 4. Cleanup temporary files
+    # 4. Cleanup temporary local images and PDF
     for p in temp_files_to_cleanup:
         try:
             Path(p).unlink()
@@ -145,17 +129,20 @@ def export_grid_to_pdf(items: List[Dict[str, str]], default_filename: str, paren
             pass
 
     if parent_widget:
-        if uploaded_file_url:
+        if success:
             QMessageBox.information(
-                parent_widget, 
-                "Cloud Sync Success", 
-                f"QR Code sheet successfully compiled and uploaded to your Master Google Drive Account!\n\nFile: {default_filename}"
+                parent_widget,
+                "Google Drive Sync Complete",
+                f"✅ QR Code Sheet uploaded to Google Drive successfully!\n\n"
+                f"File: {default_filename}\n\nLink: {web_link}"
             )
         else:
-            QMessageBox.warning(
-                parent_widget, 
-                "Cloud Warning", 
-                "PDF generated, but cloud upload failed. Check your token credentials."
+            QMessageBox.critical(
+                parent_widget,
+                "Google Drive Sync Failed",
+                f"🚨 Failed to upload QR Sheet to Google Drive.\n\n"
+                f"Details: {err_msg}\n\n"
+                f"Verify that FPD_ROOT_FOLDER_ID in config.py is correct and accessible."
             )
 
-    return uploaded_file_url
+    return web_link

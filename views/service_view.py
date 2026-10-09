@@ -1,9 +1,9 @@
 """
-views/service_form.py
+views/service_view.py
 ---------------------
 Service Logging & Maintenance Entry View for G7 Fleet Portal Desktop.
 Provides dynamic service categorization, shop/vendor selection, component wear tracking,
-and automated inventory deduction triggers.
+automatic inventory deduction, and direct Google Drive PDF upload.
 """
 
 from typing import List, Dict, Any, Optional
@@ -16,16 +16,18 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 
 from db_manager import DatabaseManager
-# utils imports
 from utils.platform_helper import get_app_data_directory, get_default_font_family
 from utils.pdf_builder import create_service_report_pdf
+from utils.date_picker import DatePickerEdit
+from config import SUBFOLDER_SERVICE_REPORTS
+from cloud_sync import upload_file_to_drive_sync
 
 
 class ServiceFormView(QWidget):
     """Interactive service logging form with dynamic tire inputs and auto-inventory triggers."""
 
-    # Signal emitted when a new service event is saved successfully
     service_logged = Signal(str)
+    cancel_requested = Signal()
 
     def __init__(self, db_manager: DatabaseManager, vehicle_data: Dict[str, Any], parent=None):
         super().__init__(parent)
@@ -48,11 +50,21 @@ class ServiceFormView(QWidget):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
 
-        # Header Title
+        # Header Title Bar
+        header_bar = QHBoxLayout()
         lbl_title = QLabel(f"🛠️ Log New Service Event — {self.vehicle.get('vehicle_id', 'Unknown')}")
-        lbl_title.setFont(QFont(get_default_font_family(), 16, QFont.Bold))
+        lbl_title.setFont(QFont(get_default_font_family(), 16, QFont.Weight.Bold))
         lbl_title.setStyleSheet("color: #89B4FA;")
-        layout.addWidget(lbl_title)
+        header_bar.addWidget(lbl_title)
+        header_bar.addStretch()
+
+        btn_cancel_top = QPushButton("Cancel")
+        btn_cancel_top.setFixedHeight(30)
+        btn_cancel_top.setStyleSheet("background-color: #45475A; color: #CDD6F4; border-radius: 6px; padding: 0 15px;")
+        btn_cancel_top.clicked.connect(self.cancel_requested.emit)
+        header_bar.addWidget(btn_cancel_top)
+
+        layout.addLayout(header_bar)
 
         # --- 1. CORE SERVICE METRICS ---
         grp_core = QGroupBox("1. Service Details & Cost")
@@ -69,14 +81,14 @@ class ServiceFormView(QWidget):
         """)
         core_layout = QVBoxLayout(grp_core)
 
-        # Row A: Date & Mileage
+        # Row A: Date Picker & Mileage
         row_a = QHBoxLayout()
-        row_a.addWidget(QLabel("Date (MM/DD/YYYY):"))
-        self.txt_date = QLineEdit()
-        self.txt_date.setPlaceholderText("MM/DD/YYYY")
+        row_a.addWidget(QLabel("Service Date:"))
+        
+        self.txt_date = DatePickerEdit(placeholder="YYYY-MM-DD", date_format="yyyy-MM-dd", default_today=True)
         self.txt_date.setFixedHeight(35)
         self.txt_date.setStyleSheet("background-color: #313244; color: #CDD6F4; border-radius: 6px; padding-left: 8px;")
-        row_a.addWidget(self.txt_date)
+        row_a.addWidget(self.txt_date, stretch=1)
 
         row_a.addWidget(QLabel("Service Mileage:"))
         self.spin_mileage = QSpinBox()
@@ -84,7 +96,7 @@ class ServiceFormView(QWidget):
         self.spin_mileage.setValue(int(self.vehicle.get('mileage', 0)))
         self.spin_mileage.setFixedHeight(35)
         self.spin_mileage.setStyleSheet("background-color: #313244; color: #CDD6F4; border-radius: 6px; padding-left: 8px;")
-        row_a.addWidget(self.spin_mileage)
+        row_a.addWidget(self.spin_mileage, stretch=1)
 
         core_layout.addLayout(row_a)
 
@@ -175,7 +187,6 @@ class ServiceFormView(QWidget):
         self.txt_repair.setStyleSheet("background-color: #313244; color: #CDD6F4; border-radius: 6px;")
         details_layout.addWidget(self.txt_repair)
 
-        # Attachments Button
         btn_files = QPushButton("📎 Attach Invoice PDFs / Photos")
         btn_files.setFixedHeight(35)
         btn_files.setStyleSheet("background-color: #45475A; color: #CDD6F4; border-radius: 6px;")
@@ -188,13 +199,23 @@ class ServiceFormView(QWidget):
 
         layout.addWidget(grp_details)
 
-        # --- 4. SUBMIT BUTTON ---
-        btn_submit = QPushButton("💾 Save & Archive Service Record")
+        # --- 4. ACTION BUTTONS ---
+        btn_box = QHBoxLayout()
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.setFixedHeight(45)
+        btn_cancel.setFont(QFont(get_default_font_family(), 11, QFont.Weight.Bold))
+        btn_cancel.setStyleSheet("background-color: #45475A; color: #CDD6F4; border-radius: 8px;")
+        btn_cancel.clicked.connect(self.cancel_requested.emit)
+        btn_box.addWidget(btn_cancel, stretch=1)
+
+        btn_submit = QPushButton("💾 Save & Upload to Cloud")
         btn_submit.setFixedHeight(45)
-        btn_submit.setFont(QFont(get_default_font_family(), 11, QFont.Bold))
+        btn_submit.setFont(QFont(get_default_font_family(), 11, QFont.Weight.Bold))
         btn_submit.setStyleSheet("background-color: #A6E3A1; color: #11111B; border-radius: 8px;")
         btn_submit.clicked.connect(self.save_service_log)
-        layout.addWidget(btn_submit)
+        btn_box.addWidget(btn_submit, stretch=3)
+
+        layout.addLayout(btn_box)
 
         scroll_area.setWidget(container)
         main_layout.addWidget(scroll_area)
@@ -219,8 +240,7 @@ class ServiceFormView(QWidget):
             self.lbl_files.setText(f"Attached {len(files)} file(s): " + ", ".join([f.split('/')[-1] for f in files]))
 
     def save_service_log(self) -> None:
-        """Validates input fields, persists service record to SQLite, and triggers auto-inventory deductions."""
-        # Build Service Type string
+        """Validates input, persists record, updates inventory, and uploads report PDF to Google Drive."""
         selected_types = []
         if self.chk_type_a.isChecked(): selected_types.append("A Service")
         if self.chk_type_b.isChecked(): selected_types.append("B Service")
@@ -233,14 +253,13 @@ class ServiceFormView(QWidget):
         issue = self.txt_issue.toPlainText().strip()
         repair = self.txt_repair.toPlainText().strip()
 
-        # Strict Validation
+        # Input validation
         if not selected_types or not invoice or not issue or not repair:
             QMessageBox.critical(self, "Validation Error", "Service Type, Invoice #, Reported Issue, and Repair Performed are all mandatory.")
             return
 
         tire_cnt = self.spin_tire_cnt.value() if self.chk_tires.isChecked() else 0
         
-        # Build Position String
         pos_list = []
         if self.chk_pos_df.isChecked(): pos_list.append("DF")
         if self.chk_pos_pf.isChecked(): pos_list.append("PF")
@@ -248,7 +267,7 @@ class ServiceFormView(QWidget):
         if self.chk_pos_pr.isChecked(): pos_list.append("PR")
         pos_str = ", ".join(pos_list) if pos_list else "N/A"
 
-        # 1. Save to SQLite Database
+        # 1. Save to Local SQLite Cache & Mutation Queue
         service_data = {
             "vehicle_id": self.vehicle.get('vehicle_id', ''),
             "vin": self.vehicle.get('vin', ''),
@@ -262,10 +281,9 @@ class ServiceFormView(QWidget):
             "tire_count": tire_cnt,
             "tire_positions": pos_str
         }
-
         self.db.save_service_record(service_data)
 
-        # 2. Trigger Automatic Bulk Inventory Deductions
+        # 2. Deduct from local inventory
         self.db.auto_deduct_inventory(
             service_types=svc_type_str,
             repair_text=f"{issue} {repair}",
@@ -273,19 +291,41 @@ class ServiceFormView(QWidget):
             vehicle_make=self.vehicle.get('make', '')
         )
 
-        # 3. Generate Single PDF Report with Attachments
+        # 3. Generate Local PDF Report
         report_dir = get_app_data_directory() / "Archived_Reports"
         report_dir.mkdir(exist_ok=True)
         
         safe_vid = self.vehicle.get('vehicle_id', 'UNK')
         safe_date = self.txt_date.text().strip().replace('/', '-')
-        pdf_filename = str(report_dir / f"ServiceReport_{safe_vid}_{safe_date}.pdf")
+        pdf_filename = f"ServiceReport_{safe_vid}_{safe_date}.pdf"
+        local_pdf_path = str(report_dir / pdf_filename)
         
         try:
-            create_service_report_pdf(service_data, self.selected_files, pdf_filename)
-            msg = f"Service record logged and compiled into PDF!\n\nSaved to:\n{pdf_filename}"
+            create_service_report_pdf(service_data, self.selected_files, local_pdf_path)
         except Exception as e:
-            msg = f"Service logged to database, but PDF compilation failed: {str(e)}"
+            QMessageBox.warning(self, "PDF Compilation Warning", f"Record saved, but local PDF build failed: {str(e)}")
+            self.service_logged.emit(self.vehicle.get('vehicle_id', ''))
+            return
 
-        QMessageBox.information(self, "Success", msg)
+        # 4. Upload to Google Drive with Direct Feedback into FPD/Service Reports
+        upload_ok, drive_link, upload_err = upload_file_to_drive_sync(
+            local_filepath=local_pdf_path,
+            drive_filename=pdf_filename,
+            subfolder_name=SUBFOLDER_SERVICE_REPORTS
+        )
+
+        if upload_ok:
+            QMessageBox.information(
+                self, "Sync Complete",
+                f"✅ Service record logged and uploaded to Google Drive!\n\n"
+                f"File: {pdf_filename}\nLink: {drive_link}"
+            )
+        else:
+            QMessageBox.warning(
+                self, "Drive Sync Warning",
+                f"⚠️ Service logged to local cache, but Google Drive upload failed.\n\n"
+                f"Details: {upload_err}\n\n"
+                f"Local copy preserved at:\n{local_pdf_path}"
+            )
+
         self.service_logged.emit(self.vehicle.get('vehicle_id', ''))

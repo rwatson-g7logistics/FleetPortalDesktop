@@ -6,96 +6,127 @@ Provides live search, multi-variable filtering, vehicle status indicators,
 and quick inline mileage updates.
 """
 
+import os
 import pandas as pd
+from datetime import datetime
+# --- PYQT6 / PYSIDE6 IMPORTS ---
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, 
     QPushButton, QTableWidget, QTableWidgetItem, QComboBox, 
     QHeaderView, QDialog, QSpinBox, QMessageBox, QFrame, QFormLayout,
-    QMenu, QInputDialog
+    QMenu, QInputDialog, QAbstractItemView, QFileDialog
 )
-from utils.qr_helper import export_grid_to_pdf, clean_vin
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QColor
-from datetime import datetime
 
+# --- UTILITY MODULE IMPORTS ---
 from db_manager import DatabaseManager
-from utils.platform_helper import get_default_font_family
+from utils.platform_helper import get_default_font_family, get_app_data_directory
+from utils.qr_helper import export_grid_to_pdf, clean_vin
+from utils.pave import generate_pave_pdf
+from utils.date_picker import DatePickerEdit
 
+# --- CLOUD SYNC & FOLDER CONSTANTS ---
+from cloud_sync import upload_file_to_drive_sync, sync_unit_to_fpd_sheet
+from config import SUBFOLDER_PAVE, SUBFOLDER_QR_CODES, FPD_SHEET_NAME
 
 class AddUnitDialog(QDialog):
-    """Modal dialog to manually add a new unit to the fleet."""
+    """Modal dialog to manually add a new unit, generate its QR code, and upload intake PAVE files."""
 
     def __init__(self, db_manager: DatabaseManager, parent=None):
         super().__init__(parent)
         self.db = db_manager
+        self.pave_source_path: str = ""
         self.init_ui()
 
     def init_ui(self) -> None:
         """Constructs the add unit modal interface."""
         self.setWindowTitle("Add New Fleet Unit")
-        self.setFixedSize(400, 450)
+        self.setFixedSize(460, 580)
         self.setStyleSheet("background-color: #1E1E2E; color: #CDD6F4;")
 
         layout = QVBoxLayout(self)
         form_layout = QFormLayout()
 
         self.txt_vid = QLineEdit()
+        self.txt_prov = QLineEdit()
         self.txt_make = QLineEdit()
         self.txt_model = QLineEdit()
+        self.txt_year = QLineEdit()
         self.txt_vin = QLineEdit()
         self.txt_plate = QLineEdit()
         self.txt_state = QLineEdit()
-        self.txt_prov = QLineEdit()
         self.cmb_cam = QComboBox()
         self.cmb_cam.addItems(["No", "Yes"])
 
-        # Apply styling to text inputs only
-        text_inputs = [self.txt_vid, self.txt_make, self.txt_model, self.txt_vin, self.txt_plate, self.txt_state, self.txt_prov]
+        self.txt_reg = DatePickerEdit(placeholder="YYYY-MM-DD", date_format="yyyy-MM-dd", default_today=False)
+        self.txt_ins = DatePickerEdit(placeholder="YYYY-MM-DD", date_format="yyyy-MM-dd", default_today=False)
+        self.txt_ret = DatePickerEdit(placeholder="YYYY-MM-DD (Rentals Only)", date_format="yyyy-MM-dd", default_today=False)
+
+        # PAVE Intake File Picker
+        pave_widget = QWidget()
+        pave_layout = QHBoxLayout(pave_widget)
+        pave_layout.setContentsMargins(0, 0, 0, 0)
+        pave_layout.setSpacing(6)
+
+        self.lbl_pave_status = QLabel("No file attached")
+        self.lbl_pave_status.setStyleSheet("color: #A6ADC8; font-size: 11px;")
+        
+        btn_browse_pave = QPushButton("📎 Attach")
+        btn_browse_pave.setFixedHeight(30)
+        btn_browse_pave.setFixedWidth(80)
+        btn_browse_pave.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_browse_pave.setStyleSheet("background-color: #313244; color: #89B4FA; border-radius: 4px; font-weight: bold;")
+        btn_browse_pave.clicked.connect(self.select_pave_file)
+
+        pave_layout.addWidget(self.lbl_pave_status, stretch=1)
+        pave_layout.addWidget(btn_browse_pave)
+
+        text_inputs = [
+            self.txt_vid, self.txt_prov, self.txt_make, self.txt_model,
+            self.txt_year, self.txt_vin, self.txt_plate, self.txt_state,
+            self.txt_reg, self.txt_ins, self.txt_ret
+        ]
         for widget in text_inputs:
-            widget.setFixedHeight(35)
+            widget.setFixedHeight(32)
             widget.setStyleSheet("""
                 background-color: #313244; 
                 color: #CDD6F4; 
                 border: 1px solid #45475A; 
-                border-radius: 6px; 
+                border-radius: 5px; 
                 padding-left: 8px;
             """)
 
-        # Apply specific styling to the ComboBox to fix the dropdown menu visibility
-        self.cmb_cam.setFixedHeight(30)
-        self.cmb_cam.setFixedWidth(75)
+        self.cmb_cam.setFixedHeight(32)
         self.cmb_cam.setStyleSheet("""
             QComboBox {
                 background-color: #313244; 
                 color: #CDD6F4; 
                 border: 1px solid #45475A; 
-                border-radius: 6px; 
+                border-radius: 5px; 
                 padding-left: 8px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #1E1E2E;
-                color: #CDD6F4;
-                selection-background-color: #45475A;
-                selection-color: #89B4FA;
-                outline: none;
-                border: 1px solid #45475A;
             }
         """)
 
-        form_layout.addRow("Unit ID:", self.txt_vid)
+        form_layout.addRow("Unit ID*:", self.txt_vid)
         form_layout.addRow("Provider:", self.txt_prov)
         form_layout.addRow("Make:", self.txt_make)
         form_layout.addRow("Model:", self.txt_model)
+        form_layout.addRow("Year:", self.txt_year)
         form_layout.addRow("VIN:", self.txt_vin)
         form_layout.addRow("Plate #:", self.txt_plate)
         form_layout.addRow("State:", self.txt_state)
         form_layout.addRow("Camera Installed:", self.cmb_cam)
+        form_layout.addRow("Registration Exp:", self.txt_reg)
+        form_layout.addRow("Insurance Exp:", self.txt_ins)
+        form_layout.addRow("Return Date:", self.txt_ret)
+        form_layout.addRow("PAVE Intake:", pave_widget)
 
         layout.addLayout(form_layout)
 
-        # Buttons
+        # Dialog Buttons
         btn_layout = QHBoxLayout()
-        btn_save = QPushButton("💾 Save Unit")
+        btn_save = QPushButton("💾 Save & Upload to Cloud")
         btn_save.setFixedHeight(35)
         btn_save.setStyleSheet("background-color: #A6E3A1; color: #11111B; font-weight: bold; border-radius: 6px;")
         btn_save.clicked.connect(self.save_unit)
@@ -109,30 +140,102 @@ class AddUnitDialog(QDialog):
         btn_layout.addWidget(btn_save)
         layout.addLayout(btn_layout)
 
+    def select_pave_file(self) -> None:
+        """Opens native file picker to attach a PAVE inspection document or photo."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select PAVE Image/Document", "", "Documents & Images (*.pdf *.png *.jpg *.jpeg *.heic)"
+        )
+        if file_path:
+            self.pave_source_path = file_path
+            filename = os.path.basename(file_path)
+            self.lbl_pave_status.setText(filename[:22] + "..." if len(filename) > 25 else filename)
+
     def save_unit(self) -> None:
-        """Validates and packages new unit data into a DataFrame for the DB Manager."""
-        vid = self.txt_vid.text().strip()
-        if not vid:
+        """Validates input, processes PAVE/QR cloud uploads, writes to Google Sheets, and updates local cache."""
+        uid = self.txt_vid.text().strip()
+        raw_vin = self.txt_vin.text().strip()
+        vin = clean_vin(raw_vin)
+
+        if not uid:
             QMessageBox.warning(self, "Validation Error", "Unit ID is required.")
             return
 
-        # Package as DataFrame to reuse the existing bulk save logic
-        new_unit_df = pd.DataFrame([{
-            'Vehicle_ID': vid,
-            'Provider': self.txt_prov.text().strip(),
-            'Make': self.txt_make.text().strip(),
-            'Model': self.txt_model.text().strip(),
-            'VIN': self.txt_vin.text().strip(),
-            'Plate': self.txt_plate.text().strip(),
-            'State': self.txt_state.text().strip(),
-            'Camera Status': self.cmb_cam.currentText(),
-            'Status': 'Active',
-            'Location': 'WNC4',  # Defaulting location as it was removed from UI
-            'Mileage': 0,
-            'Service_Interval': 7500
-        }])
-        
+        pave_cloud_link = ""
+
+        # 1. Compile & Upload PAVE File to FPD / PAVE Inspections
+        if self.pave_source_path:
+            ext = os.path.splitext(self.pave_source_path)[1].lower()
+            date_str = datetime.now().strftime("%m-%d-%y")
+            pave_dest_name = f"{uid}_PAVE_{date_str}.pdf"
+
+            if ext == ".pdf":
+                local_pave_pdf = self.pave_source_path
+            else:
+                paves_dir = str(get_app_data_directory() / "PAVES")
+                local_pave_pdf = generate_pave_pdf(
+                    unit_id=uid,
+                    source_image_path=self.pave_source_path,
+                    output_dir=paves_dir
+                )
+
+            if local_pave_pdf and os.path.exists(local_pave_pdf):
+                pave_ok, pave_url, pave_err = upload_file_to_drive_sync(
+                    local_filepath=local_pave_pdf,
+                    drive_filename=pave_dest_name,
+                    subfolder_name=SUBFOLDER_PAVE
+                )
+                if pave_ok:
+                    pave_cloud_link = pave_url
+                else:
+                    QMessageBox.warning(self, "PAVE Upload Warning", f"Could not upload PAVE to Drive: {pave_err}")
+
+        # 2. Automatically Generate and Upload Individual QR Label to FPD / QR Codes
+        if vin:
+            qr_filename = f"QR_Label_{uid}.pdf"
+            export_grid_to_pdf([{"vehicle_id": uid, "vin": vin}], qr_filename, parent_widget=None)
+
+        # 3. Build Unit Payload Dictionary
+        unit_payload = {
+            'vehicle_id': uid,
+            'provider': self.txt_prov.text().strip(),
+            'make': self.txt_make.text().strip(),
+            'model': self.txt_model.text().strip(),
+            'year': self.txt_year.text().strip(),
+            'vin': vin,
+            'plate': self.txt_plate.text().strip(),
+            'state': self.txt_state.text().strip(),
+            'camera_status': self.cmb_cam.currentText(),
+            'registration': self.txt_reg.text().strip(),
+            'insurance': self.txt_ins.text().strip(),
+            'return_date': self.txt_ret.text().strip(),
+            'pave_insp': pave_cloud_link,
+            'status': 'Active',
+            'mileage': 0,
+            'service_interval': 7500
+        }
+
+        # 4. Save to Local SQLite Database Cache
+        new_unit_df = pd.DataFrame([{k: [v] for k, v in unit_payload.items()}])
         self.db.save_vehicles_bulk(new_unit_df)
+
+        # 5. Create / Update Isolated Google Sheet in FPD Folder
+        sheet_ok, sheet_url, sheet_err = sync_unit_to_fpd_sheet(unit_payload)
+
+        # 6. Display Completion Summary
+        status_lines = [
+            f"✅ Unit {uid} added successfully!",
+            "",
+            "• Local Cache: Updated",
+            "• QR Label: Saved to FPD / QR Codes"
+        ]
+        if pave_cloud_link:
+            status_lines.append("• PAVE Inspection: Saved to FPD / PAVE Inspections")
+        if sheet_ok:
+            status_lines.append(f"• Google Sheet: Synced ({FPD_SHEET_NAME})")
+        else:
+            status_lines.append(f"⚠️ Google Sheet Warning: {sheet_err}")
+
+        QMessageBox.information(self, "Unit Intake Complete", "\n".join(status_lines))
         self.accept()
 
 
@@ -148,7 +251,7 @@ class MileageUpdateDialog(QDialog):
 
     def init_ui(self) -> None:
         """Constructs the mileage update modal interface."""
-        self.setWindowTitle(f"Update Mileage - {self.vehicle_id}")
+        self.setWindowTitle(f"Update Mileage — {self.vehicle_id}")
         self.setFixedSize(320, 180)
         self.setStyleSheet("background-color: #1E1E2E; color: #CDD6F4;")
 
@@ -156,7 +259,7 @@ class MileageUpdateDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
 
         lbl_info = QLabel(f"Current Mileage: {self.current_mileage:,} mi")
-        lbl_info.setFont(QFont(get_default_font_family(), 10, QFont.Bold))
+        lbl_info.setFont(QFont(get_default_font_family(), 10, QFont.Weight.Bold))
         layout.addWidget(lbl_info)
 
         lbl_input = QLabel("Enter New Mileage:")
@@ -205,12 +308,13 @@ class MileageUpdateDialog(QDialog):
 class FleetView(QWidget):
     """Main Fleet Command view widget displaying the active vehicle grid."""
 
-    # Signal emitted when a vehicle row 'Open Profile' button is clicked
     vehicle_selected = Signal(str)
+    data_mutated = Signal()
 
     def __init__(self, db_manager: DatabaseManager, parent=None):
         super().__init__(parent)
         self.db = db_manager
+        self.vehicles_df = pd.DataFrame()
         self.init_ui()
         self.refresh_data()
 
@@ -223,13 +327,12 @@ class FleetView(QWidget):
         # --- 1. HEADER BAR & CONTROLS ---
         header_layout = QHBoxLayout()
         lbl_title = QLabel("📊 Fleet Command Center")
-        lbl_title.setFont(QFont(get_default_font_family(), 18, QFont.Bold))
+        lbl_title.setFont(QFont(get_default_font_family(), 18, QFont.Weight.Bold))
         lbl_title.setStyleSheet("color: #CDD6F4;")
         header_layout.addWidget(lbl_title)
 
         header_layout.addStretch()
 
-        # QR Actions Dropdown Menu Button
         self.btn_qr_menu = QPushButton("🖨️ QR Actions ▼")
         self.btn_qr_menu.setFixedHeight(35)
         self.btn_qr_menu.setStyleSheet("""
@@ -313,29 +416,28 @@ class FleetView(QWidget):
             "Camera", "Mileage", "Service Status", "Restrictions", "Compliance / Return"
         ])
         
-        # Change from Stretch to Interactive to allow resizing and scrolling
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        self.table.horizontalHeader().setStretchLastSection(True) # Fills any leftover dead space on the right
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.table.horizontalHeader().setStretchLastSection(True)
         
-        # Set clean default widths for each column (in pixels)
-        self.table.setColumnWidth(0, 80)   # Unit ID
-        self.table.setColumnWidth(1, 100)  # Provider
-        self.table.setColumnWidth(2, 160)  # VIN
-        self.table.setColumnWidth(3, 100)  # Plate #
-        self.table.setColumnWidth(4, 60)   # State
-        self.table.setColumnWidth(5, 80)   # Camera
-        self.table.setColumnWidth(6, 110)  # Mileage
-        self.table.setColumnWidth(7, 160)  # Service Status
-        self.table.setColumnWidth(8, 120)  # Restrictions
-        self.table.setColumnWidth(9, 250)  # Compliance / Return
+        self.table.setColumnWidth(0, 80)
+        self.table.setColumnWidth(1, 100)
+        self.table.setColumnWidth(2, 160)
+        self.table.setColumnWidth(3, 100)
+        self.table.setColumnWidth(4, 60)
+        self.table.setColumnWidth(5, 80)
+        self.table.setColumnWidth(6, 110)
+        self.table.setColumnWidth(7, 160)
+        self.table.setColumnWidth(8, 120)
+        self.table.setColumnWidth(9, 250)
         
         self.table.verticalHeader().setVisible(False)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows) # Highlights the whole row on click
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setStyleSheet("""
             QTableWidget { background-color: #1E1E2E; color: #CDD6F4; gridline-color: #313244; border: none; border-radius: 8px; }
             QHeaderView::section { background-color: #181825; color: #89B4FA; padding: 8px; font-weight: bold; border: none; border-right: 1px solid #313244; }
             QTableWidget::item:selected { background-color: #45475A; color: #89B4FA; }
         """)
+        self.table.cellDoubleClicked.connect(self.handle_cell_double_click)
         main_layout.addWidget(self.table)
 
     def refresh_data(self) -> None:
@@ -347,7 +449,7 @@ class FleetView(QWidget):
         """Exports all fleet units into a 4x4 grid printable PDF."""
         df = self.db.get_all_vehicles()
         if df.empty:
-            QMessageBox.warning(self, "No Units", "No vehicles found in the local database cache.")
+            QMessageBox.warning(self, "No Units", "No vehicles found in local cache.")
             return
 
         items = [{"vehicle_id": str(row.get('vehicle_id', '')), "vin": str(row.get('vin', ''))} for _, row in df.iterrows()]
@@ -357,21 +459,23 @@ class FleetView(QWidget):
         """Exports currently selected table rows into a grid printable PDF."""
         selected_rows = self.table.selectionModel().selectedRows()
         if not selected_rows:
-            QMessageBox.warning(self, "Selection Required", "Please select one or more rows in the fleet table first.")
+            QMessageBox.warning(self, "Selection Required", "Please select one or more rows first.")
             return
 
         items = []
         for index in selected_rows:
             row_idx = index.row()
-            vid = self.table.item(row_idx, 0).text()
-            vin = self.table.item(row_idx, 2).text()
+            item_vid = self.table.item(row_idx, 0)
+            item_vin = self.table.item(row_idx, 2)
+            vid = item_vid.text() if item_vid else ""
+            vin = item_vin.text() if item_vin else ""
             items.append({"vehicle_id": vid, "vin": vin})
 
         export_grid_to_pdf(items, "Fleet_QR_Codes_Selected.pdf", self)
 
     def handle_manual_qr_input(self) -> None:
-        """Opens prompt dialogs to manually enter a Vehicle ID and VIN string."""
-        vid, ok1 = QInputDialog.getText(self, "Manual QR Input", "Enter Vehicle ID (e.g., VAN-88):")
+        """Prompts manually for Vehicle ID and VIN to compile a label."""
+        vid, ok1 = QInputDialog.getText(self, "Manual QR Input", "Enter Vehicle ID (e.g. VAN-88):")
         if not ok1 or not vid.strip():
             return
 
@@ -381,26 +485,27 @@ class FleetView(QWidget):
 
         sanitized_vin = clean_vin(vin)
         export_grid_to_pdf([{"vehicle_id": vid.strip(), "vin": sanitized_vin}], f"QR_Label_{vid.strip()}.pdf", self)
-    
+
     def open_add_unit_dialog(self) -> None:
-        """Opens the modal dialog for adding a new unit."""
+        """Opens modal dialog for adding a new unit."""
         dialog = AddUnitDialog(self.db, self)
-        if dialog.exec() == QDialog.Accepted:
+        if dialog.exec() == QDialog.DialogCode.Accepted:
             self.refresh_data()
+            self.data_mutated.emit()
 
     def apply_filters(self) -> None:
+        """Filters cached DataFrame and renders rows with compliance badges."""
         if self.vehicles_df.empty:
             self.table.setRowCount(0)
             return
 
         df = self.vehicles_df.copy()
-
         query = self.txt_search.text().strip().lower()
         if query:
             df = df[
-                df['vehicle_id'].str.lower().str.contains(query, na=False) |
-                df['vin'].str.lower().str.contains(query, na=False) |
-                df['plate'].str.lower().str.contains(query, na=False)
+                df['vehicle_id'].astype(str).str.lower().str.contains(query, na=False) |
+                df['vin'].astype(str).str.lower().str.contains(query, na=False) |
+                df['plate'].astype(str).str.lower().str.contains(query, na=False)
             ]
 
         stat = self.cmb_status.currentText()
@@ -417,27 +522,34 @@ class FleetView(QWidget):
             plate = str(row_data.get('plate', ''))
             state = str(row_data.get('state', ''))
             camera = str(row_data.get('camera_status', 'No'))
-            mileage = int(row_data.get('mileage', 0))
-            last_a = int(row_data.get('last_a_service', 0))
-            interval = int(row_data.get('service_interval', 7500))
             
-            # Compliance fields
+            raw_mil = str(row_data.get('mileage', 0)).replace(',', '').split('.')[0]
+            mileage = int(raw_mil) if raw_mil.isdigit() else 0
+
+            raw_last_a = str(row_data.get('last_a_service', 0)).replace(',', '').split('.')[0]
+            last_a = int(raw_last_a) if raw_last_a.isdigit() else 0
+
+            raw_int = str(row_data.get('service_interval', 7500)).split('.')[0]
+            interval = int(raw_int) if raw_int.isdigit() else 7500
+
             ret_date_str = str(row_data.get('return_date', ''))
             reg_val = str(row_data.get('registration', ''))
             ins_val = str(row_data.get('insurance', ''))
 
-            # 1. Service Status Calculation
+            # PM Status Calculation
             diff = mileage - last_a
-            if diff >= interval: svc_status = f"🔴 {diff - interval:,}m Overdue"
-            elif diff >= (interval - 500): svc_status = f"🟡 {interval - diff:,}m Due Soon"
-            else: svc_status = f"🟢 {interval - diff:,}m Left"
+            if diff >= interval:
+                svc_status = f"🔴 {diff - interval:,}m Overdue"
+            elif diff >= (interval - 500):
+                svc_status = f"🟡 {interval - diff:,}m Due Soon"
+            else:
+                svc_status = f"🟢 {interval - diff:,}m Left"
 
-            # 2. Unified Compliance Tracker (Hover Tooltip Logic)
+            # Compliance Tracker Logic
             is_critical = False
             is_warning = False
             tooltip_lines = []
 
-            # A. Check Temp Unit Return Decay
             if prov in ["Uhaul", "Budget", "Enterprise", "Other"] and ret_date_str:
                 try:
                     ret_date = datetime.strptime(ret_date_str.split(' ')[0], "%Y-%m-%d").date()
@@ -453,11 +565,9 @@ class FleetView(QWidget):
                 except ValueError:
                     tooltip_lines.append(f"ℹ️ Return Date: {ret_date_str}")
 
-            # B. Check Registration & Insurance (30-Day Warning Logic)
             for doc_name, doc_data in [("Registration", reg_val), ("Insurance", ins_val)]:
                 if doc_data and doc_data not in ['Unknown', 'Clear', 'OK']:
                     try:
-                        # Attempt to parse as date to calculate expiration
                         doc_date = datetime.strptime(doc_data.split(' ')[0], "%Y-%m-%d").date()
                         doc_delta = (doc_date - today).days
                         if doc_delta < 0:
@@ -469,10 +579,8 @@ class FleetView(QWidget):
                         else:
                             tooltip_lines.append(f"✅ {doc_name}: Valid ({doc_data})")
                     except ValueError:
-                        # If the cell just contains text (e.g. "Missing Card"), just display it
                         tooltip_lines.append(f"ℹ️ {doc_name}: {doc_data}")
 
-            # C. Build the Compliance Badge
             if is_critical:
                 comp_item = QTableWidgetItem("🚨 CRITICAL")
                 comp_item.setForeground(QColor("#F38BA8"))
@@ -485,13 +593,12 @@ class FleetView(QWidget):
                 if not tooltip_lines:
                     tooltip_lines.append("All compliance checks passed.")
 
-            # Apply underline to hint it is interactive, and inject the rich tooltip
             font = comp_item.font()
             font.setUnderline(True)
             comp_item.setFont(font)
             comp_item.setToolTip("\n".join(tooltip_lines))
 
-            # 3. Render Table Rows
+            # Populate row
             self.table.setItem(row_idx, 0, QTableWidgetItem(vid))
             self.table.setItem(row_idx, 1, QTableWidgetItem(prov))
             self.table.setItem(row_idx, 2, QTableWidgetItem(vin))
@@ -505,23 +612,24 @@ class FleetView(QWidget):
             item_mil = QTableWidgetItem(f"{mileage:,} mi")
             item_mil.setForeground(QColor("#89B4FA"))
             self.table.setItem(row_idx, 6, item_mil)
+
             self.table.setItem(row_idx, 7, QTableWidgetItem(svc_status))
             self.table.setItem(row_idx, 8, QTableWidgetItem(str(row_data.get('restrictions', 'Clear'))))
             self.table.setItem(row_idx, 9, comp_item)
 
-        self.table.cellDoubleClicked.connect(self.handle_cell_double_click)
-
     def handle_cell_double_click(self, row: int, col: int) -> None:
-        """Routes double-clicks: edits mileage if in the mileage column, otherwise opens unit profile."""
-        vid = self.table.item(row, 0).text()
-        
+        """Routes double-clicks: edits mileage if in col 6, else opens profile."""
+        item_vid = self.table.item(row, 0)
+        vid = item_vid.text() if item_vid else ""
+
         if col == 6:  # Mileage Column
-            current_str = self.table.item(row, 6).text().replace(" mi", "").replace(",", "")
-            current_mil = int(current_str) if current_str.isdigit() else 0
+            item_mil = self.table.item(row, 6)
+            raw_str = (item_mil.text() if item_mil else "").replace(" mi", "").replace(",", "")
+            current_mil = int(raw_str) if raw_str.isdigit() else 0
             dialog = MileageUpdateDialog(vid, current_mil, self)
-            if dialog.exec() == QDialog.Accepted:
-                # self.db.update_vehicle_mileage(vid, dialog.new_mileage)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self.db.update_vehicle_mileage(vid, dialog.new_mileage)
                 self.refresh_data()
+                self.data_mutated.emit()
         else:
-            # Any other column opens the Vehicle Profile
             self.vehicle_selected.emit(vid)

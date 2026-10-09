@@ -1,5 +1,5 @@
 """
-utils/pdf_builder.py
+FleetPortalDesktop/utils/pdf_builder.py
 --------------------
 Generates unified PDF service reports by combining form data and attached
 images (including HEIC). Prevents storage bloat by compiling into a single document.
@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from PIL import Image
 import pillow_heif
-from PySide6.QtGui import QTextDocument, QPdfWriter
+from PySide6.QtGui import QTextDocument, QPdfWriter, QPageSize
 from PySide6.QtCore import QMarginsF
 
 # Enable HEIC support for Apple iPhone photos
@@ -66,9 +66,7 @@ def create_service_report_pdf(service_data: dict, file_paths: list, output_filep
             try:
                 img = Image.open(path)
                 img = img.convert("RGB") # Strip Apple alpha channels and formats to standard
-                
-                # Resize massive iPhone photos to standard document width to save megabytes
-                img.thumbnail((800, 1200), Image.Resampling.LANCZOS)
+                img.thumbnail((800, 1200), Image.Resampling.LANCZOS) # Resize massive iPhone photos to standard document width
                 
                 # Save to a temporary JPEG buffer
                 temp_fd, temp_path = tempfile.mkstemp(suffix='.jpg')
@@ -89,7 +87,7 @@ def create_service_report_pdf(service_data: dict, file_paths: list, output_filep
     doc.setHtml(html_content)
 
     writer = QPdfWriter(output_filepath)
-    writer.setPageSize(QPdfWriter.PageSize.A4)
+    writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
     writer.setPageMargins(QMarginsF(15, 15, 15, 15))
     
     doc.print_(writer)

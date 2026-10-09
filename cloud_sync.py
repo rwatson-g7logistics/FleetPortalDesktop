@@ -10,6 +10,8 @@ import os
 import json
 import gspread
 import pandas as pd
+import urllib.request
+from packaging import version
 from pathlib import Path
 from typing import Optional, Tuple, Any, Dict
 
@@ -22,7 +24,7 @@ from googleapiclient.http import MediaFileUpload
 
 from config import (
     SCOPES, TOKEN_PATH, CREDENTIALS_PATH,
-    FPD_ROOT_FOLDER_ID, STRICT_FOLDER_LOCK, FPD_SHEET_NAME, STRICT_FOLDER_LOCK
+    FPD_ROOT_FOLDER_ID, STRICT_FOLDER_LOCK, FPD_SHEET_NAME, STRICT_FOLDER_LOCK, APP_VERSION, GITHUB_LATEST_RELEASE_URL
 )
 from db_manager import DatabaseManager
 
@@ -296,6 +298,44 @@ class DriveUploadWorker(QThread):
         else:
             self.upload_finished.emit(False, self.filename, err)
 
+
+class UpdateCheckWorker(QThread):
+    """Pings GitHub API to compare current client build against remote releases."""
+    update_available = Signal(str, str, str)  # latest_ver, changelog, download_url
+    check_finished = Signal(bool, str)
+
+    def run(self) -> None:
+        try:
+            req = urllib.request.Request(
+                GITHUB_LATEST_RELEASE_URL, 
+                headers={"User-Agent": "FleetPortalDesktop-Updater"}
+            )
+            with urllib.request.urlopen(req, timeout=5) as response:
+                if response.status != 200:
+                    self.check_finished.emit(False, f"HTTP Error {response.status}")
+                    return
+                data = json.loads(response.read().decode())
+
+            remote_tag = data.get("tag_name", "").lstrip("v")
+            body = data.get("body", "No changelog provided.")
+            assets = data.get("assets", [])
+
+            # Identify platform binary asset (e.g., .exe or .zip)
+            download_url = ""
+            for asset in assets:
+                name = asset.get("name", "").lower()
+                if name.endswith(".exe") or name.endswith(".zip"):
+                    download_url = asset.get("browser_download_url", "")
+                    break
+
+            if version.parse(remote_tag) > version.parse(APP_VERSION):
+                self.update_available.emit(remote_tag, body, download_url)
+                self.check_finished.emit(True, f"New version {remote_tag} found.")
+            else:
+                self.check_finished.emit(True, "Application up to date.")
+
+        except Exception as err:
+            self.check_finished.emit(False, f"Update check failed: {str(err)}")
 
 class SyncWorker(QThread):
     sync_finished = Signal(bool, str)

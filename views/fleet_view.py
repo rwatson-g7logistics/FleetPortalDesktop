@@ -3,18 +3,19 @@ views/fleet_view.py
 -------------------
 Fleet Command Center view module for G7 Fleet Portal Desktop.
 Provides live search, multi-variable filtering, vehicle status indicators,
-and quick inline mileage updates.
+quick inline mileage updates, and unified QR label generation.
 """
 
 import os
 import pandas as pd
 from datetime import datetime
+
 # --- PYQT6 / PYSIDE6 IMPORTS ---
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, 
     QPushButton, QTableWidget, QTableWidgetItem, QComboBox, 
     QHeaderView, QDialog, QSpinBox, QMessageBox, QFrame, QFormLayout,
-    QMenu, QInputDialog, QAbstractItemView, QFileDialog
+    QAbstractItemView, QFileDialog
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QColor
@@ -22,13 +23,14 @@ from PySide6.QtGui import QFont, QColor
 # --- UTILITY MODULE IMPORTS ---
 from db_manager import DatabaseManager
 from utils.platform_helper import get_default_font_family, get_app_data_directory
-from utils.qr_helper import export_grid_to_pdf, clean_vin
+from utils.qr_helper import export_grid_to_pdf, clean_vin, QRGeneratorDialog
 from utils.pave import generate_pave_pdf
 from utils.date_picker import DatePickerEdit
 
 # --- CLOUD SYNC & FOLDER CONSTANTS ---
 from cloud_sync import upload_file_to_drive_sync, sync_unit_to_fpd_sheet
 from config import SUBFOLDER_PAVE, SUBFOLDER_QR_CODES, FPD_SHEET_NAME
+
 
 class AddUnitDialog(QDialog):
     """Modal dialog to manually add a new unit, generate its QR code, and upload intake PAVE files."""
@@ -333,9 +335,11 @@ class FleetView(QWidget):
 
         header_layout.addStretch()
 
-        self.btn_qr_menu = QPushButton("🖨️ QR Actions ▼")
-        self.btn_qr_menu.setFixedHeight(35)
-        self.btn_qr_menu.setStyleSheet("""
+        # Unified QR Generator Button
+        self.btn_qr = QPushButton("🖨️ QR Generator")
+        self.btn_qr.setFixedHeight(35)
+        self.btn_qr.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_qr.setStyleSheet("""
             QPushButton {
                 background-color: #89B4FA; 
                 color: #11111B; 
@@ -343,35 +347,23 @@ class FleetView(QWidget):
                 border-radius: 6px; 
                 padding: 0 15px;
             }
-            QPushButton::menu-indicator { image: none; }
+            QPushButton:hover {
+                background-color: #B4BEFE;
+            }
         """)
-        
-        qr_menu = QMenu(self)
-        qr_menu.setStyleSheet("""
-            QMenu { background-color: #1E1E2E; color: #CDD6F4; border: 1px solid #45475A; border-radius: 6px; padding: 5px; }
-            QMenu::item { padding: 8px 20px; border-radius: 4px; }
-            QMenu::item:selected { background-color: #45475A; color: #89B4FA; }
-        """)
-        
-        act_bulk = qr_menu.addAction("📦 Bulk Fleet Sheet (4x4 Grid)")
-        act_selected = qr_menu.addAction("🔍 Generate for Selected Units")
-        act_manual = qr_menu.addAction("✍️ Manual VIN / ID Input")
-        
-        act_bulk.triggered.connect(self.handle_bulk_qr_export)
-        act_selected.triggered.connect(self.handle_selected_qr_export)
-        act_manual.triggered.connect(self.handle_manual_qr_input)
-
-        self.btn_qr_menu.setMenu(qr_menu)
-        header_layout.addWidget(self.btn_qr_menu)
+        self.btn_qr.clicked.connect(self.open_qr_menu)
+        header_layout.addWidget(self.btn_qr)
 
         btn_add_unit = QPushButton("➕ Add Unit")
         btn_add_unit.setFixedHeight(35)
+        btn_add_unit.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_add_unit.setStyleSheet("background-color: #A6E3A1; color: #11111B; font-weight: bold; border-radius: 6px; padding: 0 15px;")
         btn_add_unit.clicked.connect(self.open_add_unit_dialog)
         header_layout.addWidget(btn_add_unit)
 
         btn_refresh = QPushButton("🔄 Refresh Local Cache")
         btn_refresh.setFixedHeight(35)
+        btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_refresh.setStyleSheet("background-color: #313244; color: #CDD6F4; border-radius: 6px; padding: 0 15px;")
         btn_refresh.clicked.connect(self.refresh_data)
         header_layout.addWidget(btn_refresh)
@@ -445,46 +437,10 @@ class FleetView(QWidget):
         self.vehicles_df = self.db.get_all_vehicles()
         self.apply_filters()
 
-    def handle_bulk_qr_export(self) -> None:
-        """Exports all fleet units into a 4x4 grid printable PDF."""
-        df = self.db.get_all_vehicles()
-        if df.empty:
-            QMessageBox.warning(self, "No Units", "No vehicles found in local cache.")
-            return
-
-        items = [{"vehicle_id": str(row.get('vehicle_id', '')), "vin": str(row.get('vin', ''))} for _, row in df.iterrows()]
-        export_grid_to_pdf(items, "Fleet_QR_Codes_Bulk_4x4.pdf", self)
-
-    def handle_selected_qr_export(self) -> None:
-        """Exports currently selected table rows into a grid printable PDF."""
-        selected_rows = self.table.selectionModel().selectedRows()
-        if not selected_rows:
-            QMessageBox.warning(self, "Selection Required", "Please select one or more rows first.")
-            return
-
-        items = []
-        for index in selected_rows:
-            row_idx = index.row()
-            item_vid = self.table.item(row_idx, 0)
-            item_vin = self.table.item(row_idx, 2)
-            vid = item_vid.text() if item_vid else ""
-            vin = item_vin.text() if item_vin else ""
-            items.append({"vehicle_id": vid, "vin": vin})
-
-        export_grid_to_pdf(items, "Fleet_QR_Codes_Selected.pdf", self)
-
-    def handle_manual_qr_input(self) -> None:
-        """Prompts manually for Vehicle ID and VIN to compile a label."""
-        vid, ok1 = QInputDialog.getText(self, "Manual QR Input", "Enter Vehicle ID (e.g. VAN-88):")
-        if not ok1 or not vid.strip():
-            return
-
-        vin, ok2 = QInputDialog.getText(self, "Manual QR Input", f"Enter 17-character VIN for {vid.strip()}:")
-        if not ok2 or not vin.strip():
-            return
-
-        sanitized_vin = clean_vin(vin)
-        export_grid_to_pdf([{"vehicle_id": vid.strip(), "vin": sanitized_vin}], f"QR_Label_{vid.strip()}.pdf", self)
+    def open_qr_menu(self) -> None:
+        """Opens the unified QR Generator modal."""
+        dialog = QRGeneratorDialog(self.db, parent=self)
+        dialog.exec()
 
     def open_add_unit_dialog(self) -> None:
         """Opens modal dialog for adding a new unit."""

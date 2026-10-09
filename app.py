@@ -291,14 +291,37 @@ class FleetPortalApp(QMainWindow):
         self.inventory_view.refresh_data()
 
     def on_sync_finished(self, success: bool, message: str) -> None:
+        """Callback when initial cache verification completes."""
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100)
-        if success:
+        
+        # Verify physical credential existence before flagging connection
+        if success and TOKEN_PATH.exists():
             self.lbl_status.setText("Cloud Sync: Up to Date")
             self.btn_auth.setText("✅ Google Connected")
+            self.btn_auth.setStyleSheet("""
+                QPushButton {
+                    background-color: #313244;
+                    color: #A6E3A1;
+                    border: 1px solid #A6E3A1;
+                    border-radius: 6px;
+                    font-weight: bold;
+                    font-size: 11px;
+                }
+            """)
         else:
-            self.lbl_status.setText("Cloud Sync: Offline Mode")
+            self.lbl_status.setText("Local Cache Active (Offline)")
             self.btn_auth.setText("🔑 Connect Google Account")
+            self.btn_auth.setStyleSheet("""
+                QPushButton {
+                    background-color: #313244;
+                    color: #89B4FA;
+                    border: 1px solid #45475A;
+                    border-radius: 6px;
+                    font-weight: bold;
+                    font-size: 11px;
+                }
+            """)
 
     def on_push_finished(self, success: bool, message: str) -> None:
         self.progress_bar.setRange(0, 100)

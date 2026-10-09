@@ -9,6 +9,11 @@ and local file paths used across the system.
 import os
 from pathlib import Path
 
+# --- APPLICATION METADATA ---
+APP_VERSION = "1.0.0"
+GITHUB_REPO = "rwatson-g7logistics/FleetPortalDesktop"
+GITHUB_LATEST_RELEASE_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+
 # --- APPLICATION PATHS ---
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"

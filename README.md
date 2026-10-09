@@ -5,6 +5,7 @@ Native cross-platform desktop management workstation built with Python and PySid
 ---
 
 ## Architecture & System Design
+
 FleetPortalDesktop/
 ├── app.py                      # Application entry point, QMainWindow, navigation & view stack
 ├── config.py                   # Global constants, file paths, Google Workspace IDs, styles
@@ -42,41 +43,49 @@ FleetPortalDesktop/
 ## Installation & Setup
 
 ### 1. Prerequisites
+
 * Python 3.9+
 * Operating System: Windows 10/11 or macOS 12+
 
 ### 2. Environment Setup
 
-# Clone or locate the repository directory
+## Clone or locate the repository directory
+
 cd FleetPortalDesktop
 
-# Create and activate virtual environment
+## Create and activate virtual environment
+
 python -m venv venv
 
-# macOS / Linux
+## macOS / Linux
+
 source venv/bin/activate
 
-# Windows (Command Prompt)
+## Windows (Command Prompt)
+
 venv\Scripts\activate.bat
 
-# Install dependencies
+## Install dependencies
+
 pip install --upgrade pip
 pip install -r requirements.txt
 
 ### 3. Google Workspace Credentials
+
 Place your authorized Google OAuth client credentials file at the project root:
 
 FleetPortalDesktop/token.json
 
 Required OAuth Scopes:
 
-https://www.googleapis.com/auth/spreadsheets
+<https://www.googleapis.com/auth/spreadsheets>
 
-https://www.googleapis.com/auth/drive
+<https://www.googleapis.com/auth/drive>
 
-https://www.googleapis.com/auth/documents
+<https://www.googleapis.com/auth/documents>
 
 ### 4. Running the Application
+
 python app.py
 
 * Database Schema (Local Cache)
@@ -88,7 +97,6 @@ python app.py
 
 * * vendors: Approved internal and external repair vendors.
 
-
 ---
 
 ### Critical Codebase Issues Identified During Ingestion
@@ -96,31 +104,28 @@ python app.py
 Auditing the dropped files against `data/fleet_portal_cache.db` revealed several critical blockers preventing the app from launching or saving data:
 
 #### 1. Schema Primary Key Conflict (`vehicle_id` vs `unit_id`)
-* **Problem:** In the provided SQLite file `fleet_portal_cache.db`, the table definition is `master_vehicles(vehicle_id TEXT PRIMARY KEY, ...)`[cite: 17]. However, `db_manager.py` defines `CREATE TABLE master_vehicles(unit_id TEXT PRIMARY KEY, ...)`[cite: 5] and attempts `INSERT INTO master_vehicles (unit_id, ...)`[cite: 5]. 
+
+* **Problem:** In the provided SQLite file `fleet_portal_cache.db`, the table definition is `master_vehicles(vehicle_id TEXT PRIMARY KEY, ...)`[cite: 17]. However, `db_manager.py` defines `CREATE TABLE master_vehicles(unit_id TEXT PRIMARY KEY, ...)`[cite: 5] and attempts `INSERT INTO master_vehicles (unit_id, ...)`[cite: 5].
 * **Impact:** Any query expecting `vehicle_id` (e.g., `fleet_view.py`[cite: 9], `vehicle_profile.py`[cite: 12], `cloud_sync.py`[cite: 3]) either fails with `no such column: vehicle_id` or returns empty fields.
 
 #### 2. SQL Column Count Mismatch in `db_manager.py`
+
 * **Problem:** In `DatabaseManager.save_vehicles_bulk`:
   * Columns specified: 19 columns (`unit_id`, `provider`, `status`, `restrictions`, `location`, `camera_status`, `make`, `model`, `year`, `vin`, `plate`, `state`, `mileage`, `pave_insp`, `registration`, `insurance`, `size`, `service_interval`, `return_date`)[cite: 5].
   * Value placeholders provided: 18 (`VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)[cite: 5].
 * **Impact:** `sqlite3.OperationalError` triggers immediately whenever `SyncWorker` attempts to cache vehicles locally[cite: 3, 5].
 
 #### 3. Uninstantiated Widgets & NameErrors in `AddUnitDialog` (`fleet_view.py`)
-* **Problem:** 
+
+* **Problem:**
   * `AddUnitDialog.init_ui()` references `self.txt_year`, `self.txt_reg`, `self.txt_ins`, `self.txt_ret`, and `self.txt_pave` without initializing them as `QLineEdit` instances[cite: 9].
   * `save_unit()` references an undefined variable `unit_id` (the input was assigned to `uid`)[cite: 9].
   * `save_unit()` calls `self.db.save_vehicles_bulk(new_unit_df)` without defining `new_unit_df`[cite: 9].
 * **Impact:** Opening the "Add Unit" dialog crashes the UI with `AttributeError`; attempting to save crashes with `NameError`[cite: 9].
 
 #### 4. Missing Method in `db_manager.py`
+
 * **Problem:** `ServiceFormView.populate_vendors()` calls `self.db.get_vendor_list()`[cite: 11], but `DatabaseManager` does not implement `get_vendor_list()`[cite: 5].
 * **Impact:** Launching the service log view crashes with `AttributeError: 'DatabaseManager' object has no attribute 'get_vendor_list'`.
 
 ---
-
-### Immediate Execution Verification Checklist
-
-1. **Normalize SQLite Schema & Cache Layer:** Standardize `db_manager.py` column references to `vehicle_id` across all queries to maintain 1:1 parity with `fleet_portal_cache.db`[cite: 5, 17].
-2. **Patch SQL Parameter Counts:** Align the `INSERT INTO master_vehicles` query in `db_manager.py` so all 19 columns match 19 values and 19 `?` placeholders[cite: 5].
-3. **Add `get_vendor_list()` to `DatabaseManager`:** Implement the fetch method returning a flat list of strings from the `vendors` table[cite: 5, 11].
-4. **Repair `AddUnitDialog` Widget Declarations:** Instantiate all missing `QLineEdit` controls in `init_ui()` and wrap the payload into a valid single-row `pd.DataFrame` inside `save_unit()`[cite: 9].

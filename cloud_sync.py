@@ -67,6 +67,36 @@ def get_gspread_client() -> Optional[gspread.Client]:
     creds = get_gcp_credentials(interactive=False)
     return gspread.authorize(creds) if creds else None
 
+def parse_vehicle_id(vehicle_id: str) -> Tuple[str, str]:
+    """
+    Safely decomposes Vehicle_ID into (canonical_provider, unit_id).
+    Prevents truncation on multi-word providers (e.g. 'u_haul_1' -> 'U-Haul', '1').
+    """
+    if '_' not in vehicle_id:
+        return 'Fleet', vehicle_id
+
+    prov_tag, unit_id = vehicle_id.rsplit('_', 1)
+    canonical_map = {
+        'u_haul': 'U-Haul',
+        'merchants': 'Merchants',
+        'amzn': 'AMZN',
+        'kingbee': 'Kingbee',
+        'budget': 'Budget',
+        'enterprise': 'Enterprise',
+        'lmr': 'LMR',
+        'hertz': 'Hertz',
+    }
+    clean_tag = prov_tag.lower().strip()
+    provider = canonical_map.get(clean_tag, prov_tag.replace('_', '-').title())
+    return provider, unit_id
+
+
+def build_vehicle_id(provider: str, unit_id: str) -> str:
+    """Builds compound Vehicle_ID slug from provider and unit number."""
+    clean_prov = provider.lower().replace(' ', '_').replace('-', '_')
+    clean_unit = str(unit_id).lstrip('0') or str(unit_id)
+    return f"{clean_prov}_{clean_unit}"
+
 def pull_fpd_master_sheet() -> tuple[bool, pd.DataFrame, str]:
     """
     Downstream sync: Pulls all current records from FPD_Fleet_Master Google Sheet.
@@ -140,10 +170,10 @@ def pull_fpd_master_sheet() -> tuple[bool, pd.DataFrame, str]:
     except Exception as e:
         return False, pd.DataFrame(), str(e)
 
-
 def retire_unit_cloud(unit_id: str, retire_data: dict) -> tuple[bool, str]:
     """
-    Moves a vehicle row from FPD_Fleet_Master to FPD_Retired_Master in Google Drive.
+    Moves a vehicle row from FPD_Master_Sheet to FPD_Retired_Sheet.
+    Saves full vehicle specifications (Make, Model, Year, VIN, Plate, State).
     """
     creds = get_gcp_credentials(interactive=False)
     client = get_gspread_client()
@@ -154,7 +184,7 @@ def retire_unit_cloud(unit_id: str, retire_data: dict) -> tuple[bool, str]:
         service = build('drive', 'v3', credentials=creds)
         folder_id = FPD_ROOT_FOLDER_ID
 
-        # 1. Open Master Sheet
+        # 1. Locate row in FPD_Master_Sheet
         query_master = (
             f"name = '{FPD_SHEET_NAME}' and "
             f"'{folder_id}' in parents and "
@@ -169,15 +199,32 @@ def retire_unit_cloud(unit_id: str, retire_data: dict) -> tuple[bool, str]:
         master_ss = client.open_by_key(files[0]['id'])
         master_ws = master_ss.sheet1
 
-        cell = master_ws.find(unit_id)
-        if not cell:
-            cell = master_ws.find(unit_id.zfill(3))
-        if not cell:
-            return False, f"Unit {unit_id} not found in Google Sheet."
+        prov_hint, raw_uid = parse_vehicle_id(unit_id)
+        if retire_data.get('provider'):
+            prov_hint = str(retire_data.get('provider')).strip()
 
-        row_values = master_ws.row_values(cell.row)
+        all_rows = master_ws.get_all_values()
+        target_row_idx = None
+        row_values = []
 
-        # 2. Open or Create Retired Sheet
+        for idx, row in enumerate(all_rows[1:], start=2):
+            if len(row) >= 2:
+                row_uid = str(row[0]).strip()
+                row_prov = str(row[1]).strip()
+                if (row_uid == raw_uid and (not prov_hint or row_prov.lower() == prov_hint.lower())) or row_uid == unit_id:
+                    target_row_idx = idx
+                    row_values = row
+                    break
+
+        if not target_row_idx:
+            cell = master_ws.find(raw_uid)
+            if cell:
+                target_row_idx = cell.row
+                row_values = master_ws.row_values(cell.row)
+            else:
+                return False, f"Unit {unit_id} not found in Google Sheet."
+
+        # 2. Open or Create FPD_Retired_Sheet
         retired_sheet_name = "FPD_Retired_Sheet"
         query_retired = (
             f"name = '{retired_sheet_name}' and "
@@ -200,27 +247,38 @@ def retire_unit_cloud(unit_id: str, retire_data: dict) -> tuple[bool, str]:
             created = service.files().create(body=file_meta, fields='id').execute()
             retired_ss = client.open_by_key(created['id'])
             retired_ws = retired_ss.sheet1
-            
-            # Column A is Vehicle_ID; Unit_ID and Provider columns are removed
+
             headers = [
-                'Vehicle_ID', 'Make', 'Model', 'VIN', 
-                'Final_Mileage', 'Retired_Date', 'Reason', 'Notes', 
+                'Vehicle_ID', 'Make', 'Model', 'Year', 'VIN', 'Plate', 'State',
+                'Final_Mileage', 'Retired_Date', 'Reason', 'Notes',
                 'Camera_Uninstalled', 'Digital_Signature', 'PAVE_Outtake'
             ]
             retired_ws.append_row(headers)
 
-        # 3. Build Trimmed Payload
-        provider = str(retire_data.get('provider') or (row_values[1] if len(row_values) > 1 else ''))
-        clean_prov_tag = provider.lower().replace(' ', '_').replace('-', '_')
-        raw_uid = str(retire_data.get('unit_id') or unit_id.split('_')[-1])
-        combined_vid = f"{clean_prov_tag}_{raw_uid}" if not unit_id.startswith(clean_prov_tag) else unit_id
+        # 3. Compile Full Payload (no loss of Year, Plate, or State)
+        combined_vid = build_vehicle_id(prov_hint, raw_uid)
+        make = str(retire_data.get('make') or (row_values[6] if len(row_values) > 6 else ''))
+        model = str(retire_data.get('model') or (row_values[7] if len(row_values) > 7 else ''))
+        year = str(retire_data.get('year') or (row_values[8] if len(row_values) > 8 else ''))
+        vin = str(retire_data.get('vin') or (row_values[9] if len(row_values) > 9 else ''))
+        plate = str(retire_data.get('plate') or (row_values[10] if len(row_values) > 10 else ''))
+        state = str(retire_data.get('state') or (row_values[11] if len(row_values) > 11 else ''))
+
+        raw_mil = retire_data.get('mileage', 0)
+        final_mil = int(raw_mil) if str(raw_mil).isdigit() else 0
+        if final_mil == 0 and len(row_values) > 12:
+            cloud_mil = str(row_values[12]).replace(',', '').split('.')[0]
+            final_mil = int(cloud_mil) if cloud_mil.isdigit() else 0
 
         retired_payload = [
             combined_vid,
-            str(retire_data.get('make') or (row_values[6] if len(row_values) > 6 else '')),
-            str(retire_data.get('model') or (row_values[7] if len(row_values) > 7 else '')),
-            str(retire_data.get('vin') or (row_values[9] if len(row_values) > 9 else '')),
-            int(retire_data.get('mileage', 0)),
+            make,
+            model,
+            year,
+            vin,
+            plate,
+            state,
+            final_mil,
             str(retire_data.get('retired_date', '')),
             str(retire_data.get('reason', '')),
             str(retire_data.get('notes', '')),
@@ -230,14 +288,113 @@ def retire_unit_cloud(unit_id: str, retire_data: dict) -> tuple[bool, str]:
         ]
         retired_ws.append_row(retired_payload)
 
-        # 4. Remove from Master Sheet
-        master_ws.delete_rows(cell.row)
+        # 4. Remove active record from Master Sheet
+        master_ws.delete_rows(target_row_idx)
         return True, ""
 
     except Exception as e:
         return False, str(e)
 
+def restore_unit_from_retirement(vehicle_id: str, new_return_date: str, doc_link: str = "") -> Tuple[bool, dict, str]:
+    """
+    Moves an auto-retired unit from FPD_Retired_Sheet back to FPD_Master_Sheet.
+    Reverses Vehicle_ID into canonical Provider and Unit_ID and restores Make, Model, Year, Plate, and State.
+    """
+    creds = get_gcp_credentials(interactive=False)
+    client = get_gspread_client()
+    if not creds or not client:
+        return False, {}, "Authentication missing."
 
+    try:
+        service = build('drive', 'v3', credentials=creds)
+        folder_id = FPD_ROOT_FOLDER_ID
+
+        # 1. Open FPD_Retired_Sheet
+        q_ret = f"name = 'FPD_Retired_Sheet' and '{folder_id}' in parents and trashed = false"
+        res_ret = service.files().list(q=q_ret, spaces='drive', fields='files(id)').execute()
+        r_files = res_ret.get('files', [])
+        if not r_files:
+            return False, {}, "FPD_Retired_Sheet not found."
+
+        ret_ss = client.open_by_key(r_files[0]['id'])
+        ret_ws = ret_ss.sheet1
+
+        cell = ret_ws.find(vehicle_id)
+        if not cell:
+            cell = ret_ws.find(vehicle_id.split('_')[-1])
+        if not cell:
+            return False, {}, f"Unit {vehicle_id} not found in FPD_Retired_Sheet."
+
+        row_vals = ret_ws.row_values(cell.row)
+
+        # 2. Reverse Vehicle_ID slug into full canonical Provider and Unit ID
+        clean_vid = str(row_vals[0])
+        prov, unit_num = parse_vehicle_id(clean_vid)
+
+        make = str(row_vals[1] if len(row_vals) > 1 else '')
+        model = str(row_vals[2] if len(row_vals) > 2 else '')
+        year = str(row_vals[3] if len(row_vals) > 3 else '')
+        vin = str(row_vals[4] if len(row_vals) > 4 else '')
+        plate = str(row_vals[5] if len(row_vals) > 5 else '')
+        state = str(row_vals[6] if len(row_vals) > 6 else '')
+        mil = int(row_vals[7]) if len(row_vals) > 7 and str(row_vals[7]).isdigit() else 0
+
+        # 3. Append to FPD_Master_Sheet
+        worksheet, _ = get_or_create_fpd_sheet(service, client)
+        restored_row = [
+            unit_num, prov, 'Active', 'Clear', 'WNC4', 'No',
+            make, model, year, vin, plate, state, mil, doc_link, '', '', 'Standard', 7500, new_return_date
+        ]
+        worksheet.append_row(restored_row)
+
+        # 4. Remove archived record from Retired Sheet
+        ret_ws.delete_rows(cell.row)
+
+        restored_dict = {
+            'vehicle_id': clean_vid,
+            'unit_id': unit_num,
+            'provider': prov,
+            'make': make,
+            'model': model,
+            'year': year,
+            'vin': vin,
+            'plate': plate,
+            'state': state,
+            'mileage': mil,
+            'return_date': new_return_date,
+            'unit_type': 'Temp',
+            'status': 'Active'
+        }
+        return True, restored_dict, ""
+
+    except Exception as e:
+        return False, {}, str(e)
+
+
+def update_cloud_return_date(vehicle_id: str, new_return_date: str) -> Tuple[bool, str]:
+    """Updates the Return_Date cell for an active unit in FPD_Master_Sheet."""
+    creds = get_gcp_credentials(interactive=False)
+    client = get_gspread_client()
+    if not creds or not client:
+        return False, "Authentication missing."
+
+    try:
+        service = build('drive', 'v3', credentials=creds)
+        worksheet, _ = get_or_create_fpd_sheet(service, client)
+
+        unit_num = vehicle_id.split('_')[-1]
+        cell = worksheet.find(unit_num)
+        if not cell:
+            cell = worksheet.find(vehicle_id)
+        if not cell:
+            return False, f"Unit {vehicle_id} not found in FPD_Master_Sheet."
+
+        # Return_Date is Column 19 (Column S)
+        worksheet.update_cell(cell.row, 19, new_return_date)
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+    
 def ensure_subfolder(service: Any, folder_name: str, parent_folder_id: str) -> str:
     """
     Checks if a subfolder exists inside parent_folder_id.

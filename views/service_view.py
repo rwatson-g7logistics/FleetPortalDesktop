@@ -8,7 +8,7 @@ automatic inventory deduction, and direct Google Drive PDF upload.
 
 from typing import List, Dict, Any, Optional
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+    QGridLayout, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QComboBox, QDoubleSpinBox, QSpinBox, QTextEdit,
     QCheckBox, QGroupBox, QFileDialog, QMessageBox, QFrame, QScrollArea
 )
@@ -100,21 +100,61 @@ class ServiceFormView(QWidget):
 
         core_layout.addLayout(row_a)
 
-        # Row B: Service Types (Checkboxes)
-        core_layout.addWidget(QLabel("Service Type(s) Performed:"))
-        types_layout = QHBoxLayout()
+        # Row B: Service Type(s) Performed Container Frame
+        svc_types_frame = QFrame()
+        svc_types_frame.setStyleSheet("""
+            QFrame {
+                background-color: #181825;
+                border: 1px solid #313244;
+                border-radius: 8px;
+            }
+            QCheckBox {
+                color: #CDD6F4;
+                font-size: 13px;
+                spacing: 8px;
+                background: transparent;
+                border: none;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border-radius: 4px;
+                border: 1px solid #45475A;
+                background-color: #313244;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #89B4FA;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #89B4FA;
+                border-color: #89B4FA;
+            }
+        """)
+
+        svc_grid = QGridLayout(svc_types_frame)
+        svc_grid.setContentsMargins(14, 12, 14, 12)
+        svc_grid.setVerticalSpacing(12)
+        svc_grid.setHorizontalSpacing(20)
+
+        # Checkbox Definitions
         self.chk_type_a = QCheckBox("A Service (Oil/Filter/Rotation)")
         self.chk_type_b = QCheckBox("B Service (Comprehensive)")
+        self.chk_diagnostics = QCheckBox("General Diagnostics")
         self.chk_tires = QCheckBox("Tires")
         self.chk_brakes = QCheckBox("Brakes")
         self.chk_repair = QCheckBox("General Repair / Other")
 
-        for chk in [self.chk_type_a, self.chk_type_b, self.chk_tires, self.chk_brakes, self.chk_repair]:
-            chk.setStyleSheet("color: #CDD6F4;")
-            types_layout.addWidget(chk)
+        # Row 0: Scheduled PM & Diagnostics
+        svc_grid.addWidget(self.chk_type_a, 0, 0)
+        svc_grid.addWidget(self.chk_type_b, 0, 1)
+        svc_grid.addWidget(self.chk_diagnostics, 0, 2)
 
-        self.chk_tires.toggled.connect(self.toggle_tire_section)
-        core_layout.addLayout(types_layout)
+        # Row 1: Wear Items & Repairs
+        svc_grid.addWidget(self.chk_tires, 1, 0)
+        svc_grid.addWidget(self.chk_brakes, 1, 1)
+        svc_grid.addWidget(self.chk_repair, 1, 2)
+
+        core_layout.addWidget(svc_types_frame)
 
         # Row C: Vendor & Invoice Details
         row_c = QHBoxLayout()
@@ -244,6 +284,7 @@ class ServiceFormView(QWidget):
         selected_types = []
         if self.chk_type_a.isChecked(): selected_types.append("A Service")
         if self.chk_type_b.isChecked(): selected_types.append("B Service")
+        if self.chk_diagnostics.isChecked(): selected_types.append("Diagnostics")
         if self.chk_tires.isChecked(): selected_types.append("Tires")
         if self.chk_brakes.isChecked(): selected_types.append("Brakes")
         if self.chk_repair.isChecked(): selected_types.append("Repair / Other")
@@ -267,10 +308,16 @@ class ServiceFormView(QWidget):
         if self.chk_pos_pr.isChecked(): pos_list.append("PR")
         pos_str = ", ".join(pos_list) if pos_list else "N/A"
 
+        # Join selected checkboxes into comma-separated string
+        svc_type_str = ", ".join(selected_types) if selected_types else "General Service"
+
+        # Resolve vehicle dictionary reference safely
+        v_dict = getattr(self, 'vehicle', None) or getattr(self, 'vehicle_data', {})
+
         # 1. Save to Local SQLite Cache & Mutation Queue
         service_data = {
-            "vehicle_id": self.vehicle.get('vehicle_id', ''),
-            "vin": self.vehicle.get('vin', ''),
+            "vehicle_id": v_dict.get('vehicle_id', ''),
+            "vin": v_dict.get('vin', ''),
             "date": self.txt_date.text().strip(),
             "service_type": svc_type_str,
             "mileage": self.spin_mileage.value(),

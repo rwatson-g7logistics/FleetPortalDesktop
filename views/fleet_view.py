@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, 
     QPushButton, QTableWidget, QTableWidgetItem, QComboBox, 
     QHeaderView, QDialog, QSpinBox, QMessageBox, QFrame, QFormLayout,
-    QAbstractItemView, QFileDialog, QInputDialog
+    QAbstractItemView, QFileDialog, QInputDialog, QScrollArea
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QColor
@@ -28,6 +28,9 @@ from utils.platform_helper import get_default_font_family, get_app_data_director
 from utils.qr_helper import export_grid_to_pdf, clean_vin, QRGeneratorDialog
 from utils.pave import generate_pave_pdf
 from utils.date_picker import DatePickerEdit
+from utils.rental_lifecycle import (
+    evaluate_rental_compliance, ExtendRentalDialog, check_and_auto_retire_rentals
+)
 
 # --- CLOUD SYNC & FOLDER CONSTANTS ---
 from cloud_sync import upload_file_to_drive_sync, sync_unit_to_fpd_sheet
@@ -110,108 +113,124 @@ class AddUnitDialog(QDialog):
 
     def init_ui(self) -> None:
         self.setWindowTitle("Add New Fleet Unit")
-        self.setFixedSize(500, 660)
+        self.setFixedSize(540, 680)
         self.setStyleSheet("background-color: #1E1E2E; color: #CDD6F4;")
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 18)
-        form_layout = QFormLayout()
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(16, 16, 16, 16)
+        main_layout.setSpacing(12)
 
-        # 1. Unit ID & Unit Type
+        # Scrollable form container
+        scroll_area = QScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setStyleSheet("""
+            QScrollArea {
+                background-color: transparent;
+                border: none;
+            }
+            QScrollBar:vertical {
+                background-color: #181825;
+                width: 10px;
+                border-radius: 5px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #45475A;
+                min-height: 25px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background-color: #585B70;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+        """)
+
+        scroll_content = QWidget()
+        scroll_content.setStyleSheet("background-color: transparent;")
+        form_layout = QFormLayout(scroll_content)
+        form_layout.setContentsMargins(4, 4, 12, 8)
+        form_layout.setVerticalSpacing(12)
+        form_layout.setHorizontalSpacing(14)
+
+        # 1. Unit ID
         self.txt_vid = QLineEdit()
-        self.txt_vid.setPlaceholderText("e.g. VAN-101")
+        self.txt_vid.setPlaceholderText("e.g. 1, 42 (No leading 0)")
 
+        # Provider Container (Type + Provider dropdowns side-by-side)
         self.cmb_type = QComboBox()
         self.cmb_type.addItems(["Fleet", "Temp"])
         self.cmb_type.currentTextChanged.connect(self.on_unit_type_changed)
 
-        # 2. Dynamic Provider Selector (Strictly driven by Unit Type)
+        self.cmb_prov = QComboBox()
+        self.cmb_prov.addItems(["Merchants", "Kingbee", "Amazon", "U-Haul", "Budget", "Enterprise", "Other"])
+
         prov_widget = QWidget()
         prov_layout = QHBoxLayout(prov_widget)
         prov_layout.setContentsMargins(0, 0, 0, 0)
-        prov_layout.setSpacing(6)
+        prov_layout.setSpacing(8)
+        prov_layout.addWidget(self.cmb_type, stretch=1)
+        prov_layout.addWidget(self.cmb_prov, stretch=2)
 
-        self.cmb_prov = QComboBox()
-        self.cmb_prov.setStyleSheet(
-            "background-color: #313244; color: #CDD6F4; "
-            "border: 1px solid #45475A; border-radius: 5px; padding-left: 8px;"
-        )
+        # Make & Model Container (Make + Model dropdowns + Add button)
+        self.cmb_make = QComboBox()
+        self.cmb_model = QComboBox()
 
-        btn_add_prov = QPushButton("➕")
-        btn_add_prov.setFixedSize(32, 32)
-        btn_add_prov.setToolTip("Register New Provider for Selected Type")
-        btn_add_prov.setStyleSheet("background-color: #313244; color: #89B4FA; border-radius: 5px; font-weight: bold;")
-        btn_add_prov.clicked.connect(self.prompt_add_provider)
-
-        prov_layout.addWidget(self.cmb_prov, stretch=1)
-        prov_layout.addWidget(btn_add_prov)
-
-        # Populate initial providers for "Fleet"
-        self.refresh_providers()
-
-        # 3. Cascading Make & Model Selectors
         make_widget = QWidget()
         make_layout = QHBoxLayout(make_widget)
         make_layout.setContentsMargins(0, 0, 0, 0)
-        make_layout.setSpacing(6)
-
-        self.cmb_make = QComboBox()
-        self.cmb_make.setStyleSheet(
-            "background-color: #313244; color: #CDD6F4; "
-            "border: 1px solid #45475A; border-radius: 5px; padding-left: 8px;"
-        )
-        self.cmb_make.currentTextChanged.connect(self.on_make_changed)
-
-        btn_add_mm = QPushButton("➕")
-        btn_add_mm.setFixedSize(32, 32)
-        btn_add_mm.setToolTip("Register New Make / Model")
-        btn_add_mm.setStyleSheet("background-color: #313244; color: #89B4FA; border-radius: 5px; font-weight: bold;")
-        btn_add_mm.clicked.connect(self.prompt_add_make_model)
-
+        make_layout.setSpacing(8)
         make_layout.addWidget(self.cmb_make, stretch=1)
-        make_layout.addWidget(btn_add_mm)
+        make_layout.addWidget(self.cmb_model, stretch=1)
 
-        self.cmb_model = QComboBox()
-        self.cmb_model.setStyleSheet(
-            "background-color: #313244; color: #CDD6F4; "
-            "border: 1px solid #45475A; border-radius: 5px; padding-left: 8px;"
-        )
+        if hasattr(self, 'open_add_make_dialog'):
+            btn_add_make = QPushButton("➕")
+            btn_add_make.setFixedSize(30, 32)
+            btn_add_make.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_add_make.setStyleSheet("background-color: #313244; color: #89B4FA; font-weight: bold; border-radius: 5px;")
+            btn_add_make.clicked.connect(self.open_add_make_dialog)
+            make_layout.addWidget(btn_add_make)
 
-        self.refresh_makes_and_models()
-
-        # 4. Identification & Specifications
-        self.txt_year = QLineEdit()
-        self.txt_vin = QLineEdit()
-        self.txt_plate = QLineEdit()
-        self.txt_state = QLineEdit()
-
+        # 2. Size & Specifications
         self.cmb_size = QComboBox()
-        self.cmb_size.setEditable(True)
-        self.cmb_size.addItems(["Standard", "Large", "Extra Large (XL)", "CDV", "Step Van", "Box Truck"])
-        self.cmb_size.setStyleSheet(
-            "background-color: #313244; color: #CDD6F4; "
-            "border: 1px solid #45475A; border-radius: 5px; padding-left: 8px;"
-        )
+        self.cmb_size.addItems(["Standard", "High Roof", "Extended", "Box Truck"])
+
+        self.txt_year = QLineEdit()
+        self.txt_year.setPlaceholderText("YYYY")
+
+        self.txt_vin = QLineEdit()
+        self.txt_vin.setMaxLength(17)
+        self.txt_vin.setPlaceholderText("17-Character VIN")
+
+        self.txt_plate = QLineEdit()
+        self.txt_plate.setPlaceholderText("License Plate #")
+
+        self.txt_state = QLineEdit()
+        self.txt_state.setPlaceholderText("State (e.g. NC)")
 
         self.cmb_cam = QComboBox()
         self.cmb_cam.addItems(["No", "Yes"])
 
-        self.txt_reg = DatePickerEdit(placeholder="YYYY-MM-DD", date_format="yyyy-MM-dd", default_today=False)
-        self.txt_ins = DatePickerEdit(placeholder="YYYY-MM-DD", date_format="yyyy-MM-dd", default_today=False)
-        self.txt_ret = DatePickerEdit(placeholder="YYYY-MM-DD (Rentals Only)", date_format="yyyy-MM-dd", default_today=False)
+        # 3. Dates
+        self.txt_reg = DatePickerEdit(placeholder="YYYY-MM-DD", date_format="yyyy-MM-dd")
+        self.txt_ins = DatePickerEdit(placeholder="YYYY-MM-DD", date_format="yyyy-MM-dd")
+        self.txt_ret = DatePickerEdit(placeholder="YYYY-MM-DD", date_format="yyyy-MM-dd")
 
-        # 5. PAVE Intake File Attachment
+        # 4. PAVE Intake Upload Widget
         pave_widget = QWidget()
         pave_layout = QHBoxLayout(pave_widget)
         pave_layout.setContentsMargins(0, 0, 0, 0)
-        pave_layout.setSpacing(6)
+        pave_layout.setSpacing(8)
 
-        self.lbl_pave_status = QLabel("No file attached")
+        self.lbl_pave_status = QLabel("No document attached")
         self.lbl_pave_status.setStyleSheet("color: #A6ADC8; font-size: 11px;")
 
-        btn_browse_pave = QPushButton("📎 Attach")
+        btn_browse_pave = QPushButton("📎 Attach PAVE")
         btn_browse_pave.setFixedHeight(30)
-        btn_browse_pave.setFixedWidth(80)
+        btn_browse_pave.setFixedWidth(120)
+        btn_browse_pave.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_browse_pave.setStyleSheet("background-color: #313244; color: #89B4FA; border-radius: 4px; font-weight: bold;")
         btn_browse_pave.clicked.connect(self.select_pave_file)
 
@@ -219,18 +238,56 @@ class AddUnitDialog(QDialog):
         pave_layout.addWidget(btn_browse_pave)
 
         # Apply standard field styling
-        form_widgets = [
-            self.txt_vid, self.cmb_type, self.cmb_size, self.txt_year, self.txt_vin,
-            self.txt_plate, self.txt_state, self.cmb_cam, self.txt_reg,
-            self.txt_ins, self.txt_ret, self.cmb_prov, self.cmb_model
-        ]
-        for w in form_widgets:
-            w.setFixedHeight(32)
-            if isinstance(w, (QLineEdit, QComboBox)):
-                w.setStyleSheet(
-                    "background-color: #313244; color: #CDD6F4; "
-                    "border: 1px solid #45475A; border-radius: 5px; padding-left: 8px;"
-                )
+        combo_style = """
+            QComboBox {
+                background-color: #313244;
+                color: #CDD6F4;
+                border: 1px solid #45475A;
+                border-radius: 6px;
+                padding: 4px 10px;
+                padding-right: 25px;
+                min-height: 32px;
+                font-size: 13px;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 25px;
+                border-left: 1px solid #45475A;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #181825;
+                color: #CDD6F4;
+                selection-background-color: #45475A;
+                selection-color: #89B4FA;
+                border: 1px solid #45475A;
+                padding: 4px;
+                outline: 0;
+            }
+            QComboBox QAbstractItemView::item {
+                min-height: 32px;
+                padding: 6px 10px;
+            }
+        """
+
+        input_style = """
+            background-color: #313244;
+            color: #CDD6F4;
+            border: 1px solid #45475A;
+            border-radius: 6px;
+            padding: 4px 10px;
+            min-height: 32px;
+            font-size: 13px;
+        """
+
+        combo_widgets = [self.cmb_type, self.cmb_prov, self.cmb_make, self.cmb_model, self.cmb_size, self.cmb_cam]
+        for cb in combo_widgets:
+            cb.setStyleSheet(combo_style)
+            cb.setMaxVisibleItems(10)
+
+        text_widgets = [self.txt_vid, self.txt_year, self.txt_vin, self.txt_plate, self.txt_state, self.txt_reg, self.txt_ins, self.txt_ret]
+        for tw in text_widgets:
+            tw.setStyleSheet(input_style)
 
         # Build Form Rows
         form_layout.addRow("Unit ID*:", self.txt_vid)
@@ -249,9 +306,10 @@ class AddUnitDialog(QDialog):
         form_layout.addRow("Return Date:", self.txt_ret)
         form_layout.addRow("PAVE Intake:", pave_widget)
 
-        layout.addLayout(form_layout)
+        scroll_area.setWidget(scroll_content)
+        main_layout.addWidget(scroll_area, stretch=1)
 
-        # Action Buttons
+        # Action Buttons (Pinned to bottom)
         btn_layout = QHBoxLayout()
         btn_save = QPushButton("💾 Save & Upload to Cloud")
         btn_save.setFixedHeight(35)
@@ -265,7 +323,7 @@ class AddUnitDialog(QDialog):
 
         btn_layout.addWidget(btn_cancel)
         btn_layout.addWidget(btn_save)
-        layout.addLayout(btn_layout)
+        main_layout.addLayout(btn_layout)
 
     def on_unit_type_changed(self, unit_type: str) -> None:
         """Repopulates the provider dropdown whenever Unit Type changes."""
@@ -352,6 +410,15 @@ class AddUnitDialog(QDialog):
 
         clean_unit_id = raw_uid.lstrip('0') or raw_uid
         prov = self.cmb_prov.currentText().strip()
+
+        # Enforce exact 17-character VIN requirement
+        if len(vin) != 17:
+            QMessageBox.warning(
+                self,
+                "Invalid VIN",
+                f"VIN must be exactly 17 characters.\n\nCurrent length: {len(vin)} characters\nEntered: '{vin}'"
+            )
+            return
         
         # Build deterministic Vehicle_ID: e.g. "merchants_1", "kingbee_42", "u-haul_8803"
         clean_prov_tag = prov.lower().replace(' ', '_').replace('-', '_')
@@ -629,9 +696,11 @@ class FleetView(QWidget):
         """)
         self.table.cellDoubleClicked.connect(self.handle_cell_double_click)
         main_layout.addWidget(self.table)
+        self.table.cellClicked.connect(self.handle_cell_click)
 
     def refresh_data(self) -> None:
-        """Loads vehicle records from SQLite and updates the table view."""
+        """Runs automated lifecycle checks, loads vehicle records, and updates the table view."""
+        check_and_auto_retire_rentals(self.db, parent_widget=self)
         self.vehicles_df = self.db.get_all_vehicles()
         self.apply_filters()
 
@@ -731,59 +800,44 @@ class FleetView(QWidget):
             else:
                 svc_status = f"🟢 {interval - diff:,}m Left"
 
-            # Compliance Tracker Logic: Rental return checks
-            is_critical = False
-            is_warning = False
+            # Compliance Tracker Logic using rental lifecycle evaluator
             tooltip_lines = []
-
-            # Check by unit_type or known rental vendors (includes U-Haul with hyphen, LMR, Hertz)
             is_rental = (
                 str(row_data.get('unit_type', '')).strip() == 'Temp' or 
-                prov in ["U-Haul", "Budget", "Enterprise", "LMR", "Hertz", "Other"]
+                prov in ["U-Haul", "Budget", "Enterprise", "LMR", "Hertz"]
             )
-            if is_rental and ret_date_str:
-                try:
-                    ret_date = datetime.strptime(ret_date_str.split(' ')[0], "%Y-%m-%d").date()
-                    delta = (ret_date - today).days
-                    if delta < 0:
-                        is_critical = True
-                        tooltip_lines.append(f"🚨 OVERDUE: Return was {abs(delta)} days ago ({ret_date_str})")
-                    elif delta <= 2:
-                        is_warning = True
-                        tooltip_lines.append(f"⚠️ RETURN SOON: Due in {delta} days ({ret_date_str})")
-                    else:
-                        tooltip_lines.append(f"ℹ️ Return Date: {delta} days left ({ret_date_str})")
-                except ValueError:
-                    tooltip_lines.append(f"ℹ️ Return Date: {ret_date_str}")
 
+            if is_rental and ret_date_str:
+                eval_res = evaluate_rental_compliance(ret_date_str)
+                comp_badge = eval_res['badge']
+                comp_color = eval_res['color']
+                tooltip_lines.append(eval_res['tooltip'])
+            else:
+                comp_badge = "✅ Compliant"
+                comp_color = "#A6E3A1"
+
+            # Check registration and insurance expiration
             for doc_name, doc_data in [("Registration", reg_val), ("Insurance", ins_val)]:
                 if doc_data and doc_data not in ['Unknown', 'Clear', 'OK']:
                     try:
                         doc_date = datetime.strptime(doc_data.split(' ')[0], "%Y-%m-%d").date()
                         doc_delta = (doc_date - today).days
                         if doc_delta < 0:
-                            is_critical = True
+                            comp_badge = "🚨 EXPIRED"
+                            comp_color = "#F38BA8"
                             tooltip_lines.append(f"🚨 EXPIRED {doc_name}: {abs(doc_delta)} days ago ({doc_data})")
                         elif doc_delta <= 30:
-                            is_warning = True
+                            if comp_badge not in ["🚨 EXPIRED", "🚨 Due Tomorrow", "🚨 Return Due Today"]:
+                                comp_badge = "⚠️ EXPIRING"
+                                comp_color = "#F9E2AF"
                             tooltip_lines.append(f"⚠️ EXPIRING {doc_name}: In {doc_delta} days ({doc_data})")
                         else:
                             tooltip_lines.append(f"✅ {doc_name}: Valid ({doc_data})")
                     except ValueError:
                         tooltip_lines.append(f"ℹ️ {doc_name}: {doc_data}")
 
-            if is_critical:
-                comp_item = QTableWidgetItem("🚨 CRITICAL")
-                comp_item.setForeground(QColor("#F38BA8"))
-            elif is_warning:
-                comp_item = QTableWidgetItem("⚠️ WARNING")
-                comp_item.setForeground(QColor("#F9E2AF"))
-            else:
-                comp_item = QTableWidgetItem("✅ Compliant")
-                comp_item.setForeground(QColor("#A6E3A1"))
-                if not tooltip_lines:
-                    tooltip_lines.append("All compliance checks passed.")
-
+            comp_item = QTableWidgetItem(comp_badge)
+            comp_item.setForeground(QColor(comp_color))
             font = comp_item.font()
             font.setUnderline(True)
             comp_item.setFont(font)
@@ -809,6 +863,26 @@ class FleetView(QWidget):
             self.table.setItem(row_idx, 7, QTableWidgetItem(svc_status))
             self.table.setItem(row_idx, 8, QTableWidgetItem(str(row_data.get('restrictions', 'Clear'))))
             self.table.setItem(row_idx, 9, comp_item)
+
+    def handle_cell_click(self, row: int, col: int) -> None:
+        """Single click on column 9 (Compliance / Return) opens Extend Rental dialog."""
+        if col == 9:
+            item_vid = self.table.item(row, 0)
+            vid = str(item_vid.data(Qt.ItemDataRole.UserRole) or item_vid.text() if item_vid else "")
+            
+            # Find matching vehicle dictionary
+            matches = self.vehicles_df[self.vehicles_df['vehicle_id'] == vid]
+            if not matches.empty:
+                v_data = matches.iloc[0].to_dict()
+                prov = str(v_data.get('provider', ''))
+                unit_type = str(v_data.get('unit_type', ''))
+                
+                # Check if unit is a rental
+                if unit_type == 'Temp' or prov in ["U-Haul", "Budget", "Enterprise", "LMR", "Hertz"]:
+                    dialog = ExtendRentalDialog(self.db, v_data, is_retired=False, parent=self)
+                    if dialog.exec() == QDialog.DialogCode.Accepted:
+                        self.refresh_data()
+                        self.data_mutated.emit()
 
     def handle_cell_double_click(self, row: int, col: int) -> None:
         """Routes double-clicks: edits mileage if in col 6, else opens profile."""

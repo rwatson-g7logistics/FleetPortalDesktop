@@ -62,11 +62,180 @@ def get_gcp_credentials(interactive: bool = False) -> Optional[Any]:
 
     return creds
 
-
 def get_gspread_client() -> Optional[gspread.Client]:
     """Returns an authorized gspread client instance."""
     creds = get_gcp_credentials(interactive=False)
     return gspread.authorize(creds) if creds else None
+
+def pull_fpd_master_sheet() -> tuple[bool, pd.DataFrame, str]:
+    """
+    Downstream sync: Pulls all current records from FPD_Fleet_Master Google Sheet.
+    Returns (success, dataframe, error_message).
+    """
+    creds = get_gcp_credentials(interactive=False)
+    client = get_gspread_client()
+    if not creds or not client:
+        return False, pd.DataFrame(), "Authentication missing. Connect Google account in sidebar."
+
+    try:
+        service = build('drive', 'v3', credentials=creds)
+        folder_id = FPD_ROOT_FOLDER_ID
+
+        query = (
+            f"name = '{FPD_SHEET_NAME}' and "
+            f"'{folder_id}' in parents and "
+            f"mimeType = 'application/vnd.google-apps.spreadsheet' and "
+            f"trashed = false"
+        )
+        res = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
+        files = res.get('files', [])
+
+        if not files:
+            return False, pd.DataFrame(), f"'{FPD_SHEET_NAME}' not found in Google Drive."
+
+        sheet_id = files[0]['id']
+        spreadsheet = client.open_by_key(sheet_id)
+        worksheet = spreadsheet.sheet1
+
+        data = worksheet.get_all_records()
+        if not data:
+            return True, pd.DataFrame(), ""
+
+        df = pd.DataFrame(data)
+
+        column_map = {
+            'Unit_ID': 'vehicle_id',
+            'Unit ID': 'vehicle_id',
+            'Provider': 'provider',
+            'Status': 'status',
+            'Restrictions': 'restrictions',
+            'Location': 'location',
+            'Camera Status': 'camera_status',
+            'Make': 'make',
+            'Model': 'model',
+            'Year': 'year',
+            'VIN': 'vin',
+            'Plate': 'plate',
+            'State': 'state',
+            'Mileage': 'mileage',
+            'PAVE_Insp': 'pave_insp',
+            'Registration': 'registration',
+            'Insurance': 'insurance',
+            'Return_Date': 'return_date',
+            'Return Date': 'return_date',
+            'Unit_Type': 'unit_type',
+            'Unit Type': 'unit_type',
+            'Size': 'size'
+        }
+        df = df.rename(columns=column_map)
+        if 'vehicle_id' in df.columns and 'provider' in df.columns:
+            df['unit_id'] = df['vehicle_id'].astype(str)
+            df['vehicle_id'] = df.apply(
+                lambda r: f"{str(r['provider']).lower().replace(' ', '_').replace('-', '_')}_{str(r['unit_id'])}"
+                if '_' not in str(r['vehicle_id']) else str(r['vehicle_id']),
+                axis=1
+            )
+        return True, df, ""
+
+    except Exception as e:
+        return False, pd.DataFrame(), str(e)
+
+
+def retire_unit_cloud(unit_id: str, retire_data: dict) -> tuple[bool, str]:
+    """
+    Moves a vehicle row from FPD_Fleet_Master to FPD_Retired_Master in Google Drive.
+    """
+    creds = get_gcp_credentials(interactive=False)
+    client = get_gspread_client()
+    if not creds or not client:
+        return False, "Authentication missing. Connect Google account in sidebar."
+
+    try:
+        service = build('drive', 'v3', credentials=creds)
+        folder_id = FPD_ROOT_FOLDER_ID
+
+        # 1. Open Master Sheet
+        query_master = (
+            f"name = '{FPD_SHEET_NAME}' and "
+            f"'{folder_id}' in parents and "
+            f"mimeType = 'application/vnd.google-apps.spreadsheet' and "
+            f"trashed = false"
+        )
+        res = service.files().list(q=query_master, spaces='drive', fields='files(id, name)').execute()
+        files = res.get('files', [])
+        if not files:
+            return False, "Master sheet not found."
+
+        master_ss = client.open_by_key(files[0]['id'])
+        master_ws = master_ss.sheet1
+
+        cell = master_ws.find(unit_id)
+        if not cell:
+            cell = master_ws.find(unit_id.zfill(3))
+        if not cell:
+            return False, f"Unit {unit_id} not found in Google Sheet."
+
+        row_values = master_ws.row_values(cell.row)
+
+        # 2. Open or Create Retired Sheet
+        retired_sheet_name = "FPD_Retired_Sheet"
+        query_retired = (
+            f"name = '{retired_sheet_name}' and "
+            f"'{folder_id}' in parents and "
+            f"mimeType = 'application/vnd.google-apps.spreadsheet' and "
+            f"trashed = false"
+        )
+        res_ret = service.files().list(q=query_retired, spaces='drive', fields='files(id, name)').execute()
+        ret_files = res_ret.get('files', [])
+
+        if ret_files:
+            retired_ss = client.open_by_key(ret_files[0]['id'])
+            retired_ws = retired_ss.sheet1
+        else:
+            file_meta = {
+                'name': retired_sheet_name,
+                'mimeType': 'application/vnd.google-apps.spreadsheet',
+                'parents': [folder_id]
+            }
+            created = service.files().create(body=file_meta, fields='id').execute()
+            retired_ss = client.open_by_key(created['id'])
+            retired_ws = retired_ss.sheet1
+            
+            # Column A is Vehicle_ID; Unit_ID and Provider columns are removed
+            headers = [
+                'Vehicle_ID', 'Make', 'Model', 'VIN', 
+                'Final_Mileage', 'Retired_Date', 'Reason', 'Notes', 
+                'Camera_Uninstalled', 'Digital_Signature', 'PAVE_Outtake'
+            ]
+            retired_ws.append_row(headers)
+
+        # 3. Build Trimmed Payload
+        provider = str(retire_data.get('provider') or (row_values[1] if len(row_values) > 1 else ''))
+        clean_prov_tag = provider.lower().replace(' ', '_').replace('-', '_')
+        raw_uid = str(retire_data.get('unit_id') or unit_id.split('_')[-1])
+        combined_vid = f"{clean_prov_tag}_{raw_uid}" if not unit_id.startswith(clean_prov_tag) else unit_id
+
+        retired_payload = [
+            combined_vid,
+            str(retire_data.get('make') or (row_values[6] if len(row_values) > 6 else '')),
+            str(retire_data.get('model') or (row_values[7] if len(row_values) > 7 else '')),
+            str(retire_data.get('vin') or (row_values[9] if len(row_values) > 9 else '')),
+            int(retire_data.get('mileage', 0)),
+            str(retire_data.get('retired_date', '')),
+            str(retire_data.get('reason', '')),
+            str(retire_data.get('notes', '')),
+            str(retire_data.get('camera_uninstalled', 'No')),
+            str(retire_data.get('signature', '')),
+            str(retire_data.get('pave_link', ''))
+        ]
+        retired_ws.append_row(retired_payload)
+
+        # 4. Remove from Master Sheet
+        master_ws.delete_rows(cell.row)
+        return True, ""
+
+    except Exception as e:
+        return False, str(e)
 
 
 def ensure_subfolder(service: Any, folder_name: str, parent_folder_id: str) -> str:
@@ -182,10 +351,11 @@ def sync_unit_to_fpd_sheet(unit_data: Dict[str, Any]) -> Tuple[bool, str, str]:
     try:
         service = build('drive', 'v3', credentials=creds)
         worksheet, sheet_url = get_or_create_fpd_sheet(service, client)
+        display_unit_id = str(unit_data.get('unit_id') or str(unit_data.get('vehicle_id', '')).split('_')[-1])
 
         # Build row aligned with FLEET_SHEET_HEADERS
         row = [
-            str(unit_data.get('vehicle_id', '')),
+            display_unit_id,
             str(unit_data.get('provider', '')),
             str(unit_data.get('status', 'Active')),
             str(unit_data.get('restrictions', 'Clear')),

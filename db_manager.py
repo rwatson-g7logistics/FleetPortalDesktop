@@ -7,17 +7,26 @@ SQLite database manager for local data persistence, caching, and HIVE mirror ing
 import json
 import sqlite3
 import pandas as pd
+
+from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from config import DB_PATH
 
+from utils.platform_helper import get_app_data_directory
 
 class DatabaseManager:
-    """Manages local SQLite database operations, schema migrations, and sync queue."""
+    """Manages local SQLite database operations and sync queuing."""
 
-    def __init__(self, db_path=DB_PATH):
-        self.db_path = str(db_path)
+    def __init__(self, db_path: Optional[str] = None):
+        if db_path:
+            self.db_path = Path(db_path)
+        else:
+            self.db_path = get_app_data_directory() / "data" / "fleet_portal_cache.db"
+
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.init_db()
+        self.init_lookup_tables()
 
     def get_connection(self) -> sqlite3.Connection:
         """Returns a connection instance to the local SQLite database."""
@@ -109,6 +118,144 @@ class DatabaseManager:
             """)
 
             conn.commit()
+
+    # --- LOOKUP TABLES FOR PROVIDERS, MAKES, AND MODELS ---
+    def init_lookup_tables(self) -> None:
+        """Initializes and migrates lookup tables for Providers, Makes, and Models."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+
+            # 1. Ensure unit_type column exists on master_vehicles
+            cursor.execute("PRAGMA table_info(master_vehicles)")
+            columns = [row[1] for row in cursor.fetchall()]
+            if "unit_type" not in columns:
+                cursor.execute("ALTER TABLE master_vehicles ADD COLUMN unit_type TEXT DEFAULT 'Fleet'")
+            if "size" not in columns:
+                cursor.execute("ALTER TABLE master_vehicles ADD COLUMN size TEXT DEFAULT ''")
+
+            # 2. Providers Lookup Table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS lookup_providers (
+                    name TEXT PRIMARY KEY,
+                    provider_type TEXT NOT NULL DEFAULT 'Fleet'
+                )
+            """)
+
+            # Ensure provider_type column exists if table was previously created without it
+            cursor.execute("PRAGMA table_info(lookup_providers)")
+            prov_cols = [row[1] for row in cursor.fetchall()]
+            if "provider_type" not in prov_cols:
+                cursor.execute("ALTER TABLE lookup_providers ADD COLUMN provider_type TEXT DEFAULT 'Fleet'")
+
+            # PURGE LEGACY PREFIXES: Remove old 'Temp-*' records from cache
+            cursor.execute("DELETE FROM lookup_providers WHERE name LIKE 'Temp-%'")
+
+            # Clean seed data with strict type separation
+            clean_providers = [
+                # Fleet Providers (Dedicated / Long-term)
+                ("Merchants", "Fleet"),
+                ("AMZN", "Fleet"),
+                ("Kingbee", "Fleet"),
+                # Temp Providers (Rentals / Short-term)
+                ("U-Haul", "Temp"),
+                ("Budget", "Temp"),
+                ("Enterprise", "Temp"),
+                ("LMR", "Temp"),
+                ("Hertz", "Temp")
+            ]
+            cursor.executemany(
+                "INSERT OR REPLACE INTO lookup_providers (name, provider_type) VALUES (?, ?)",
+                clean_providers
+            )
+
+            # 3. Cascading Make & Model Lookup Table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS lookup_vehicle_models (
+                    make TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    PRIMARY KEY (make, model)
+                )
+            """)
+
+            # Purge pruned models if previously seeded in local cache
+            cursor.execute("""
+                DELETE FROM lookup_vehicle_models 
+                WHERE (make = 'Chevrolet' AND model IN ('Express 2500', 'Express 3500'))
+                   OR (make = 'Rivian' AND model IN ('EDV 500', 'EDV 700'))
+            """)
+
+            # Streamlined Delivery Fleet Defaults
+            default_vehicles = [
+                ("Ford", "Transit 150"),
+                ("Ford", "Transit 250"),
+                ("Ford", "Transit 350"),
+                ("Ford", "E-Transit"),
+                ("Ram", "ProMaster 1500"),
+                ("Ram", "ProMaster 2500"),
+                ("Ram", "ProMaster 3500"),
+                ("Mercedes-Benz", "Sprinter 2500"),
+                ("Mercedes-Benz", "Sprinter 3500"),
+                ("Freightliner", "MT45 Step Van"),
+                ("Freightliner", "MT55 Step Van")
+            ]
+            cursor.executemany(
+                "INSERT OR IGNORE INTO lookup_vehicle_models (make, model) VALUES (?, ?)",
+                default_vehicles
+            )
+            conn.commit()
+
+    def get_providers(self, provider_type: Optional[str] = None) -> list:
+        """Retrieves registered providers, filtered strictly by provider_type ('Fleet' or 'Temp')."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            if provider_type:
+                cursor.execute(
+                    "SELECT name FROM lookup_providers WHERE provider_type = ? ORDER BY name ASC",
+                    (provider_type,)
+                )
+            else:
+                cursor.execute("SELECT name FROM lookup_providers ORDER BY name ASC")
+            return [row[0] for row in cursor.fetchall()]
+
+    def add_provider(self, name: str, provider_type: str = "Fleet") -> bool:
+        """Adds or updates a provider in the lookup cache with its designated unit type."""
+        clean_name = name.strip()
+        if not clean_name:
+            return False
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO lookup_providers (name, provider_type) VALUES (?, ?)",
+                (clean_name, provider_type)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def get_makes(self) -> list:
+        """Retrieves unique vehicle makes."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT make FROM lookup_vehicle_models ORDER BY make ASC")
+            return [row[0] for row in cursor.fetchall()]
+
+    def get_models_for_make(self, make: str) -> list:
+        """Retrieves models associated with a specific make."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT model FROM lookup_vehicle_models WHERE make = ? ORDER BY model ASC", (make,))
+            return [row[0] for row in cursor.fetchall()]
+
+    def add_make_model(self, make: str, model: str) -> bool:
+        """Adds a new Make/Model combination."""
+        clean_make = make.strip()
+        clean_model = model.strip()
+        if not clean_make or not clean_model:
+            return False
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR IGNORE INTO lookup_vehicle_models (make, model) VALUES (?, ?)", (clean_make, clean_model))
+            conn.commit()
+            return cursor.rowcount > 0
 
     # --- VEHICLE QUERIES & CACHING ---
 
@@ -208,6 +355,27 @@ class DatabaseManager:
             target_id=str(vehicle_data.get('vehicle_id', '')),
             payload=vehicle_data
         )
+
+    # --- VEHICLE PURGE & RETIREMENT ---
+    def replace_all_vehicles(self, df: pd.DataFrame) -> None:
+        """
+        Reconciles local cache with Google Sheets:
+        Purges cached records and overwrites with authoritative cloud data.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM master_vehicles")
+            conn.commit()
+
+        if not df.empty:
+            self.save_vehicles_bulk(df)
+
+    def retire_vehicle(self, unit_id: str) -> None:
+        """Removes a retired unit from the active roster in SQLite."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM master_vehicles WHERE vehicle_id = ?", (unit_id,))
+            conn.commit()
 
     # --- QUEUE MANAGEMENT ---
 

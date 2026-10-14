@@ -99,6 +99,16 @@ python app.py
 
 ---
 
+### Terminal Command Lines
+
+## Scrub Provider List
+python -c "from db_manager import DatabaseManager; db = DatabaseManager(); conn = db.get_connection(); conn.cursor().execute(\"DELETE FROM lookup_providers WHERE name IN ('DummyFleet', 'DummyTemp')\"); conn.commit(); print('Cleaned lookup_providers.')"
+
+## Check Provider List
+python -c "from db_manager import DatabaseManager; db = DatabaseManager(); print('Fleet:', db.get_providers('Fleet')); print('Temp:', db.get_providers('Temp'))"
+
+---
+
 ### Critical Codebase Issues Identified During Ingestion
 
 Auditing the dropped files against `data/fleet_portal_cache.db` revealed several critical blockers preventing the app from launching or saving data:

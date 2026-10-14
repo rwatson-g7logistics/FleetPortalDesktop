@@ -165,7 +165,7 @@ class AddUnitDialog(QDialog):
         self.cmb_type.currentTextChanged.connect(self.on_unit_type_changed)
 
         self.cmb_prov = QComboBox()
-        self.cmb_prov.addItems(["Merchants", "Kingbee", "Amazon", "U-Haul", "Budget", "Enterprise", "Other"])
+        self.refresh_providers()
 
         prov_widget = QWidget()
         prov_layout = QHBoxLayout(prov_widget)
@@ -174,9 +174,19 @@ class AddUnitDialog(QDialog):
         prov_layout.addWidget(self.cmb_type, stretch=1)
         prov_layout.addWidget(self.cmb_prov, stretch=2)
 
+        btn_add_prov = QPushButton("➕")
+        btn_add_prov.setFixedSize(30, 32)
+        btn_add_prov.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_add_prov.setStyleSheet("background-color: #313244; color: #89B4FA; font-weight: bold; border-radius: 5px;")
+        btn_add_prov.clicked.connect(self.prompt_add_provider)
+        prov_layout.addWidget(btn_add_prov)
+
         # Make & Model Container (Make + Model dropdowns + Add button)
         self.cmb_make = QComboBox()
         self.cmb_model = QComboBox()
+
+        self.cmb_make.currentTextChanged.connect(self.on_make_changed)
+        self.refresh_makes_and_models()
 
         make_widget = QWidget()
         make_layout = QHBoxLayout(make_widget)
@@ -185,12 +195,12 @@ class AddUnitDialog(QDialog):
         make_layout.addWidget(self.cmb_make, stretch=1)
         make_layout.addWidget(self.cmb_model, stretch=1)
 
-        if hasattr(self, 'open_add_make_dialog'):
+        if hasattr(self, 'prompt_add_make_model'):
             btn_add_make = QPushButton("➕")
             btn_add_make.setFixedSize(30, 32)
             btn_add_make.setCursor(Qt.CursorShape.PointingHandCursor)
             btn_add_make.setStyleSheet("background-color: #313244; color: #89B4FA; font-weight: bold; border-radius: 5px;")
-            btn_add_make.clicked.connect(self.open_add_make_dialog)
+            btn_add_make.clicked.connect(self.prompt_add_make_model)
             make_layout.addWidget(btn_add_make)
 
         # 2. Size & Specifications

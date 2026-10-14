@@ -101,11 +101,34 @@ python app.py
 
 ### 5. Terminal Command Lines
 
-## Scrub Provider List
+### 1. Terminal Git Commit & Push
+
+git add .
+git commit -m "[placeholder for update comment]"
+git push origin main
+git status
+
+### 2. Database Administration & CLI Utilities (Temporary)
+
+Use these one-line commands in your terminal to inspect and purge test metadata until UI management dialogs are implemented.
+
+## 1. Provider Lookup Table (`lookup_providers`)
+
+* Inspect Provider List
+python -c "from db_manager import DatabaseManager; db = DatabaseManager(); print('Fleet:', db.get_providers('Fleet')); print('Temp:', db.get_providers('Temp'))"
+* Scrub Provider List
 python -c "from db_manager import DatabaseManager; db = DatabaseManager(); conn = db.get_connection(); conn.cursor().execute(\"DELETE FROM lookup_providers WHERE name IN ('DummyFleet', 'DummyTemp')\"); conn.commit(); print('Cleaned lookup_providers.')"
 
-## Check Provider List
-python -c "from db_manager import DatabaseManager; db = DatabaseManager(); print('Fleet:', db.get_providers('Fleet')); print('Temp:', db.get_providers('Temp'))"
+## 2. Make & Model Lookup Table (lookup_make_models)
+
+* Inspect Registered Makes:
+python -c "from db_manager import DatabaseManager; db = DatabaseManager(); print('Makes:', db.get_makes())"
+* Inspect Models for a Specific Make:
+python -c "from db_manager import DatabaseManager; db = DatabaseManager(); print('RAM Models:', db.get_models_for_make('RAM'))"
+* Purge Specific Test Make/Model Combinations:
+python -c "from db_manager import DatabaseManager; db = DatabaseManager(); conn = db.get_connection(); conn.cursor().execute(\"DELETE FROM lookup_make_models WHERE make = 'TestMake' AND model = 'TestModel'\"); conn.commit(); print('Cleaned lookup_make_models.')"
+
+
 
 ---
 

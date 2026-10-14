@@ -587,20 +587,22 @@ class VehicleProfileView(QWidget):
             # 1. Cloud Move to FPD_Retired_Sheet
             cloud_ok, err = retire_unit_cloud(unit_id, dialog.retire_payload)
             if not cloud_ok:
-                QMessageBox.warning(
+                print(f"\n[RETIREMENT WARNING] Cloud archive issue for {unit_id}: {err}")
+                QMessageBox.critical(
                     self, 
-                    "Cloud Sync Warning", 
-                    f"Could not archive to Google Drive: {err}\nPurging local record."
+                    "Cloud Sync Incomplete", 
+                    f"⚠️ Google Sheets Sync Warning for Unit {unit_id}:\n\n{err}\n\nLocal record will now be purged."
                 )
 
             # 2. Local Purge
             self.db.retire_vehicle(unit_id)
 
-            QMessageBox.information(
-                self,
-                "Unit Retired",
-                f"✅ Unit {unit_id} has been retired.\nArchived to FPD_Retired_Sheet in Google Drive."
-            )
+            if cloud_ok:
+                QMessageBox.information(
+                    self,
+                    "Unit Retired",
+                    f"✅ Unit {unit_id} has been successfully retired.\nArchived to FPD_Retired_Sheet in Google Drive."
+                )
 
             # Signal return to Fleet Command view
             self.back_requested.emit()

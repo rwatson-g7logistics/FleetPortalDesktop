@@ -32,12 +32,14 @@ class CalendarDialog(QDialog):
         super().__init__(parent)
         self.date_format = date_format
         self.selected_date_str = current_date_str
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
         self.init_ui(current_date_str)
 
     def init_ui(self, current_date_str: str) -> None:
         """Constructs the dark-themed calendar dialog layout."""
         self.setWindowTitle("Select Date")
-        self.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setStyleSheet("""
             QDialog {
                 background-color: #181825;
@@ -211,16 +213,18 @@ class DatePickerEdit(QWidget):
         layout.addWidget(self.btn_picker)
 
     def open_calendar(self) -> None:
-        """Displays the popup calendar positioned directly under the input field."""
-        dialog = CalendarDialog(
-            current_date_str=self.txt_date.text().strip(),
-            date_format=self.date_format,
-            parent=self
-        )
-        pos = self.mapToGlobal(self.rect().bottomLeft())
-        dialog.move(pos)
+        """Opens calendar dialog popup."""
+        parent_window = self.window()
+        dialog = CalendarDialog(self.text(), date_format=self.date_format, parent=parent_window)
+        
+        # Calculate popup position below the edit line
+        global_pos = self.mapToGlobal(self.rect().bottomLeft())
+        dialog.move(global_pos.x(), global_pos.y() + 4)
+        
+        dialog.raise_()
+        dialog.activateWindow()
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.txt_date.setText(dialog.selected_date_str)
+            self.setText(dialog.selected_date_str)
 
     def text(self) -> str:
         """Returns the current date string."""

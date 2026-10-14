@@ -224,7 +224,7 @@ def retire_unit_cloud(unit_id: str, retire_data: dict) -> tuple[bool, str]:
             else:
                 return False, f"Unit {unit_id} not found in Google Sheet."
 
-        # 2. Open or Create FPD_Retired_Sheet
+        # 2. Open or Create FPD_Retired_Sheet with 14 Standard Headers
         retired_sheet_name = "FPD_Retired_Sheet"
         query_retired = (
             f"name = '{retired_sheet_name}' and "
@@ -235,9 +235,19 @@ def retire_unit_cloud(unit_id: str, retire_data: dict) -> tuple[bool, str]:
         res_ret = service.files().list(q=query_retired, spaces='drive', fields='files(id, name)').execute()
         ret_files = res_ret.get('files', [])
 
+        retired_headers = [
+            'Vehicle_ID', 'Make', 'Model', 'Year', 'VIN', 'Plate', 'State',
+            'Final_Mileage', 'Retired_Date', 'Reason', 'Notes',
+            'Camera_Uninstalled', 'Digital_Signature', 'PAVE_Outtake'
+        ]
+
         if ret_files:
             retired_ss = client.open_by_key(ret_files[0]['id'])
             retired_ws = retired_ss.sheet1
+            # Auto-align header row if it is missing columns
+            current_headers = retired_ws.row_values(1)
+            if current_headers != retired_headers:
+                retired_ws.update('A1:N1', [retired_headers])
         else:
             file_meta = {
                 'name': retired_sheet_name,
@@ -247,15 +257,9 @@ def retire_unit_cloud(unit_id: str, retire_data: dict) -> tuple[bool, str]:
             created = service.files().create(body=file_meta, fields='id').execute()
             retired_ss = client.open_by_key(created['id'])
             retired_ws = retired_ss.sheet1
+            retired_ws.append_row(retired_headers)
 
-            headers = [
-                'Vehicle_ID', 'Make', 'Model', 'Year', 'VIN', 'Plate', 'State',
-                'Final_Mileage', 'Retired_Date', 'Reason', 'Notes',
-                'Camera_Uninstalled', 'Digital_Signature', 'PAVE_Outtake'
-            ]
-            retired_ws.append_row(headers)
-
-        # 3. Compile Full Payload (no loss of Year, Plate, or State)
+        # 3. Compile Full 14-Column Payload (Strictly 1:1 with retired_headers)
         combined_vid = build_vehicle_id(prov_hint, raw_uid)
         make = str(retire_data.get('make') or (row_values[6] if len(row_values) > 6 else ''))
         model = str(retire_data.get('model') or (row_values[7] if len(row_values) > 7 else ''))
@@ -370,6 +374,34 @@ def restore_unit_from_retirement(vehicle_id: str, new_return_date: str, doc_link
     except Exception as e:
         return False, {}, str(e)
 
+def update_cloud_vehicle_mileage(vehicle_id: str, new_mileage: int) -> Tuple[bool, str]:
+    """
+    Directly updates Column M (Mileage, Column 13) in FPD_Master_Sheet.
+    Prevents cache refreshes from rolling back local odometer changes.
+    """
+    creds = get_gcp_credentials(interactive=False)
+    client = get_gspread_client()
+    if not creds or not client:
+        return False, "Authentication missing."
+
+    try:
+        service = build('drive', 'v3', credentials=creds)
+        worksheet, _ = get_or_create_fpd_sheet(service, client)
+
+        clean_uid = vehicle_id.split('_')[-1].lstrip('0') or vehicle_id.split('_')[-1]
+        
+        # Locate row by display Unit ID or compound Vehicle ID
+        cell = worksheet.find(clean_uid)
+        if not cell:
+            cell = worksheet.find(vehicle_id)
+        if not cell:
+            return False, f"Unit '{vehicle_id}' not found in FPD_Master_Sheet."
+
+        # Update Column 13 (Column M: Mileage)
+        worksheet.update_cell(cell.row, 13, int(new_mileage))
+        return True, ""
+    except Exception as e:
+        return False, str(e)
 
 def update_cloud_return_date(vehicle_id: str, new_return_date: str) -> Tuple[bool, str]:
     """Updates the Return_Date cell for an active unit in FPD_Master_Sheet."""

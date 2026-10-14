@@ -207,6 +207,10 @@ class AddUnitDialog(QDialog):
         self.cmb_size = QComboBox()
         self.cmb_size.addItems(["Standard", "High Roof", "Extended", "Box Truck"])
 
+        self.spin_intake_mileage = QSpinBox()
+        self.spin_intake_mileage.setRange(0, 1000000)
+        self.spin_intake_mileage.setValue(0)
+
         self.txt_year = QLineEdit()
         self.txt_year.setPlaceholderText("YYYY")
 
@@ -295,7 +299,7 @@ class AddUnitDialog(QDialog):
             cb.setStyleSheet(combo_style)
             cb.setMaxVisibleItems(10)
 
-        text_widgets = [self.txt_vid, self.txt_year, self.txt_vin, self.txt_plate, self.txt_state, self.txt_reg, self.txt_ins, self.txt_ret]
+        text_widgets = [self.txt_vid, self.txt_year, self.txt_vin, self.txt_plate, self.txt_state, self.spin_intake_mileage, self.txt_reg, self.txt_ins, self.txt_ret]
         for tw in text_widgets:
             tw.setStyleSheet(input_style)
 
@@ -310,6 +314,7 @@ class AddUnitDialog(QDialog):
         form_layout.addRow("VIN:", self.txt_vin)
         form_layout.addRow("Plate #:", self.txt_plate)
         form_layout.addRow("State:", self.txt_state)
+        form_layout.addRow("Intake Mileage*:", self.spin_intake_mileage)
         form_layout.addRow("Camera Installed:", self.cmb_cam)
         form_layout.addRow("Registration Exp:", self.txt_reg)
         form_layout.addRow("Insurance Exp:", self.txt_ins)
@@ -399,12 +404,12 @@ class AddUnitDialog(QDialog):
           
     
     def save_unit(self) -> None:
+        """Validates vehicle inputs, enforces uniqueness, generates QR/PAVE assets, and commits to cache and cloud."""
         raw_uid = self.txt_vid.text().strip()
         raw_vin = self.txt_vin.text().strip()
         vin = clean_vin(raw_vin)
 
-        # --- REPLACE UNIT ID VALIDATION & PAYLOAD KEY WITH THIS: ---
-
+        # --- 1. UNIT NUMBER VALIDATION & IDENTIFIER CONSTRUCTION ---
         if not raw_uid:
             QMessageBox.warning(self, "Validation Error", "Unit Number is required.")
             return
@@ -420,8 +425,10 @@ class AddUnitDialog(QDialog):
 
         clean_unit_id = raw_uid.lstrip('0') or raw_uid
         prov = self.cmb_prov.currentText().strip()
+        clean_prov_tag = prov.lower().replace(' ', '_').replace('-', '_')
+        vehicle_id = f"{clean_prov_tag}_{clean_unit_id}"
 
-        # Enforce exact 17-character VIN requirement
+        # --- 2. VIN VALIDATION (EXACT 17 CHARACTERS) ---
         if len(vin) != 17:
             QMessageBox.warning(
                 self,
@@ -429,14 +436,50 @@ class AddUnitDialog(QDialog):
                 f"VIN must be exactly 17 characters.\n\nCurrent length: {len(vin)} characters\nEntered: '{vin}'"
             )
             return
-        
-        # Build deterministic Vehicle_ID: e.g. "merchants_1", "kingbee_42", "u-haul_8803"
-        clean_prov_tag = prov.lower().replace(' ', '_').replace('-', '_')
-        vehicle_id = f"{clean_prov_tag}_{clean_unit_id}"
 
+        # --- 3. DUPLICATE VALIDATION SAFEGUARDS (UNIT ID, VIN, PLATE) ---
+        existing_df = self.db.get_all_vehicles()
+        if not existing_df.empty:
+            # Check Unit ID collision under the same provider
+            dup_id = existing_df[existing_df['vehicle_id'].astype(str).str.lower() == vehicle_id.lower()]
+            if not dup_id.empty:
+                QMessageBox.warning(
+                    self, 
+                    "Duplicate Unit", 
+                    f"Unit '{clean_unit_id}' already exists under provider '{prov}'!\n(Vehicle ID: {vehicle_id})"
+                )
+                return
+
+            # Check VIN duplication
+            dup_vin = existing_df[existing_df['vin'].astype(str).str.upper() == vin.upper()]
+            if not dup_vin.empty:
+                v_row = dup_vin.iloc[0]
+                assigned_id = v_row.get('unit_id') or v_row.get('vehicle_id', 'Unknown')
+                assigned_prov = v_row.get('provider', 'Unknown')
+                QMessageBox.warning(
+                    self, 
+                    "Duplicate VIN", 
+                    f"VIN '{vin}' is already registered to Unit {assigned_id} ({assigned_prov})!"
+                )
+                return
+
+            # Check Plate duplication (if entered)
+            plate_val = self.txt_plate.text().strip().upper()
+            if plate_val:
+                dup_plate = existing_df[existing_df['plate'].astype(str).str.upper() == plate_val]
+                if not dup_plate.empty:
+                    v_row = dup_plate.iloc[0]
+                    assigned_id = v_row.get('unit_id') or v_row.get('vehicle_id', 'Unknown')
+                    assigned_prov = v_row.get('provider', 'Unknown')
+                    QMessageBox.warning(
+                        self, 
+                        "Duplicate License Plate", 
+                        f"License Plate '{plate_val}' is already registered to Unit {assigned_id} ({assigned_prov})!"
+                    )
+                    return
+
+        # --- 4. PAVE INTAKE DOCUMENT UPLOAD ---
         pave_cloud_link = ""
-
-        # 1. PAVE File Upload
         if self.pave_source_path:
             ext = os.path.splitext(self.pave_source_path)[1].lower()
             date_str = datetime.now().strftime("%m-%d-%y")
@@ -463,17 +506,17 @@ class AddUnitDialog(QDialog):
                 else:
                     QMessageBox.warning(self, "PAVE Upload Warning", f"Could not upload PAVE to Drive: {pave_err}")
 
-        # 2. QR Code Generation
+        # --- 5. QR CODE GENERATION ---
         if vin:
             qr_filename = f"QR_Label_{vehicle_id}.pdf"
             export_grid_to_pdf([{"vehicle_id": vehicle_id, "vin": vin}], qr_filename, parent_widget=None)
 
-        # 3. Payload Construction
+        # --- 6. PAYLOAD CONSTRUCTION ---
         unit_payload = {
             'vehicle_id': vehicle_id,
             'unit_id': clean_unit_id,
             'unit_type': self.cmb_type.currentText().strip(),
-            'provider': self.cmb_prov.currentText().strip(),
+            'provider': prov,
             'make': self.cmb_make.currentText().strip(),
             'model': self.cmb_model.currentText().strip(),
             'size': self.cmb_size.currentText().strip(),
@@ -487,21 +530,22 @@ class AddUnitDialog(QDialog):
             'return_date': self.txt_ret.text().strip(),
             'pave_insp': pave_cloud_link,
             'status': 'Active',
-            'mileage': 0,
+            'mileage': self.spin_intake_mileage.value(),
             'service_interval': 7500
         }
 
-        # 4. Save to Local SQLite Cache & Cloud Sheet
+        # --- 7. SAVE TO LOCAL SQLITE CACHE & SYNC TO CLOUD SHEET ---
         new_unit_df = pd.DataFrame([unit_payload])
         self.db.save_vehicles_bulk(new_unit_df)
 
         sheet_ok, sheet_url, sheet_err = sync_unit_to_fpd_sheet(unit_payload)
 
-        # 5. Summary Message
+        # --- 8. SUMMARY NOTIFICATION & DIALOG ACCEPT ---
         status_lines = [
-            f"✅ Unit {vehicle_id} added successfully!",
-            f"• Type: {unit_payload['unit_type']} | Provider: {unit_payload['provider']}",
+            f"✅ Unit {clean_unit_id} ({prov}) added successfully!",
+            f"• Identifier: {vehicle_id}",
             f"• Vehicle: {unit_payload['make']} {unit_payload['model']} ({unit_payload['size']})",
+            f"• Intake Mileage: {unit_payload['mileage']:,} mi",
             "• Local Cache: Updated",
             "• QR Label: Saved to FPD / QR Codes"
         ]
@@ -810,14 +854,11 @@ class FleetView(QWidget):
             else:
                 svc_status = f"🟢 {interval - diff:,}m Left"
 
-            # Compliance Tracker Logic using rental lifecycle evaluator
+            # Compliance Tracker: Standardized Return Date & Document Expiration for ALL Units
             tooltip_lines = []
-            is_rental = (
-                str(row_data.get('unit_type', '')).strip() == 'Temp' or 
-                prov in ["U-Haul", "Budget", "Enterprise", "LMR", "Hertz"]
-            )
-
-            if is_rental and ret_date_str:
+            
+            # 1. Return Date Flagging (Applies to both Fleet & Temp if a date is set)
+            if ret_date_str and ret_date_str not in ['None', 'N/A', 'Clear', '', 'Unknown']:
                 eval_res = evaluate_rental_compliance(ret_date_str)
                 comp_badge = eval_res['badge']
                 comp_color = eval_res['color']
@@ -826,9 +867,9 @@ class FleetView(QWidget):
                 comp_badge = "✅ Compliant"
                 comp_color = "#A6E3A1"
 
-            # Check registration and insurance expiration
+            # 2. Registration and Insurance Expiration Tracking
             for doc_name, doc_data in [("Registration", reg_val), ("Insurance", ins_val)]:
-                if doc_data and doc_data not in ['Unknown', 'Clear', 'OK']:
+                if doc_data and doc_data not in ['Unknown', 'Clear', 'OK', 'N/A']:
                     try:
                         doc_date = datetime.strptime(doc_data.split(' ')[0], "%Y-%m-%d").date()
                         doc_delta = (doc_date - today).days
@@ -884,11 +925,11 @@ class FleetView(QWidget):
             matches = self.vehicles_df[self.vehicles_df['vehicle_id'] == vid]
             if not matches.empty:
                 v_data = matches.iloc[0].to_dict()
-                prov = str(v_data.get('provider', ''))
-                unit_type = str(v_data.get('unit_type', ''))
                 
-                # Check if unit is a rental
-                if unit_type == 'Temp' or prov in ["U-Haul", "Budget", "Enterprise", "LMR", "Hertz"]:
+                # Open extension/return dialog for any unit that has a scheduled return date
+                ret_val = str(v_data.get('return_date', '')).strip()
+                unit_type = str(v_data.get('unit_type', ''))
+                if ret_val or unit_type == 'Temp':
                     dialog = ExtendRentalDialog(self.db, v_data, is_retired=False, parent=self)
                     if dialog.exec() == QDialog.DialogCode.Accepted:
                         self.refresh_data()
@@ -906,7 +947,13 @@ class FleetView(QWidget):
             current_mil = int(raw_str) if raw_str.isdigit() else 0
             dialog = MileageUpdateDialog(vehicle_id, current_mil, self)
             if dialog.exec() == QDialog.DialogCode.Accepted:
-                self.db.update_vehicle_mileage(vehicle_id, dialog.new_mileage)
+                new_mil = dialog.new_mileage
+                self.db.update_vehicle_mileage(vehicle_id, new_mil)
+                
+                # Push odometer change to Google Sheets so force-refresh won't overwrite it
+                from cloud_sync import update_cloud_vehicle_mileage
+                update_cloud_vehicle_mileage(vehicle_id, new_mil)
+
                 self.refresh_data()
                 self.data_mutated.emit()
         else:

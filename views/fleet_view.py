@@ -506,10 +506,26 @@ class AddUnitDialog(QDialog):
                 else:
                     QMessageBox.warning(self, "PAVE Upload Warning", f"Could not upload PAVE to Drive: {pave_err}")
 
-        # --- 5. QR CODE GENERATION ---
+        # --- 5. CONSOLIDATED MASTER QR SHEET GENERATION ---
         if vin:
-            qr_filename = f"QR_Label_{vehicle_id}.pdf"
-            export_grid_to_pdf([{"vehicle_id": vehicle_id, "vin": vin}], qr_filename, parent_widget=None)
+            all_units = self.db.get_all_vehicles()
+            qr_roster = []
+            if not all_units.empty:
+                for _, r in all_units.iterrows():
+                    v_vin = clean_vin(str(r.get('vin', '')))
+                    v_uid = str(r.get('unit_id') or r.get('vehicle_id', '')).split('_')[-1]
+                    if v_vin:
+                        qr_roster.append({"vehicle_id": v_uid, "vin": v_vin})
+
+            # Append the unit being created if not already in roster
+            if not any(item['vin'] == vin for item in qr_roster):
+                qr_roster.append({"vehicle_id": clean_unit_id, "vin": vin})
+
+            # Sort roster numerically by Unit ID
+            qr_roster.sort(key=lambda x: int(x['vehicle_id']) if str(x['vehicle_id']).isdigit() else 9999)
+
+            master_qr_filename = "Master_Fleet_QR_Labels.pdf"
+            export_grid_to_pdf(qr_roster, master_qr_filename, parent_widget=None)
 
         # --- 6. PAYLOAD CONSTRUCTION ---
         unit_payload = {

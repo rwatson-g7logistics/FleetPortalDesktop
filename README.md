@@ -99,7 +99,7 @@ python app.py
 
 ---
 
-### Terminal Command Lines
+### 5. Terminal Command Lines
 
 ## Scrub Provider List
 python -c "from db_manager import DatabaseManager; db = DatabaseManager(); conn = db.get_connection(); conn.cursor().execute(\"DELETE FROM lookup_providers WHERE name IN ('DummyFleet', 'DummyTemp')\"); conn.commit(); print('Cleaned lookup_providers.')"

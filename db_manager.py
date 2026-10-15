@@ -67,6 +67,7 @@ class DatabaseManager:
                 )
             """)
 
+            # --- 2. SERVICE LOGS TABLE DEFINITION ---
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS service_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,9 +83,38 @@ class DatabaseManager:
                     doc_type TEXT,
                     payment_route TEXT,
                     tire_count INTEGER DEFAULT 0,
-                    tire_positions TEXT
+                    tire_positions TEXT,
+                    tread_df INTEGER DEFAULT 0,
+                    tread_pf INTEGER DEFAULT 0,
+                    tread_dr INTEGER DEFAULT 0,
+                    tread_pr INTEGER DEFAULT 0,
+                    brake_front_mm INTEGER DEFAULT 0,
+                    brake_front_pct INTEGER DEFAULT 0,
+                    brake_rear_mm INTEGER DEFAULT 0,
+                    brake_rear_pct INTEGER DEFAULT 0,
+                    rotor_condition TEXT DEFAULT 'Good'
                 )
             """)
+
+            # --- 2B. AUTO-MIGRATE EXISTING DATABASE CACHES ---
+            cursor.execute("PRAGMA table_info(service_logs)")
+            existing_cols = [c[1] for c in cursor.fetchall()]
+
+            inspection_fields = {
+                'tread_df': 'INTEGER DEFAULT 0',
+                'tread_pf': 'INTEGER DEFAULT 0',
+                'tread_dr': 'INTEGER DEFAULT 0',
+                'tread_pr': 'INTEGER DEFAULT 0',
+                'brake_front_mm': 'INTEGER DEFAULT 0',
+                'brake_front_pct': 'INTEGER DEFAULT 0',
+                'brake_rear_mm': 'INTEGER DEFAULT 0',
+                'brake_rear_pct': 'INTEGER DEFAULT 0',
+                'rotor_condition': "TEXT DEFAULT 'Good'"
+            }
+
+            for col_name, col_type in inspection_fields.items():
+                if col_name not in existing_cols:
+                    cursor.execute(f"ALTER TABLE service_logs ADD COLUMN {col_name} {col_type}")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS inventory (
@@ -450,23 +480,45 @@ class DatabaseManager:
             conn.commit()
 
     def save_service_record(self, data: Dict[str, Any]) -> None:
+        """Persists maintenance event, inspection telemetry, and payment route to SQLite."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO service_logs (
                     vehicle_id, vin, date, service_type, mileage, vendor,
-                    invoice_num, cost, notes, tire_count, tire_positions
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    invoice_num, cost, notes, payment_route, tire_count, tire_positions,
+                    tread_df, tread_pf, tread_dr, tread_pr,
+                    brake_front_mm, brake_front_pct, brake_rear_mm, brake_rear_pct,
+                    rotor_condition
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                data['vehicle_id'], data['vin'], data['date'], data['service_type'],
-                data['mileage'], data['vendor'], data['invoice_num'], data['cost'],
-                data['notes'], data['tire_count'], data['tire_positions']
+                data.get('vehicle_id', ''),
+                data.get('vin', ''),
+                data.get('date', ''),
+                data.get('service_type', ''),
+                int(data.get('mileage', 0)),
+                data.get('vendor', ''),
+                data.get('invoice_num', ''),
+                float(data.get('cost', 0.0)),
+                data.get('notes', ''),
+                data.get('payment_route', 'Provider'),
+                int(data.get('tire_count', 0)),
+                data.get('tire_positions', ''),
+                int(data.get('tread_df', 0)),
+                int(data.get('tread_pf', 0)),
+                int(data.get('tread_dr', 0)),
+                int(data.get('tread_pr', 0)),
+                int(data.get('brake_front_mm', 0)),
+                int(data.get('brake_front_pct', 0)),
+                int(data.get('brake_rear_mm', 0)),
+                int(data.get('brake_rear_pct', 0)),
+                data.get('rotor_condition', 'Good')
             ))
             cursor.execute("""
                 UPDATE master_vehicles 
                 SET mileage = MAX(mileage, ?) 
                 WHERE vehicle_id = ?
-            """, (data['mileage'], data['vehicle_id']))
+            """, (int(data.get('mileage', 0)), data.get('vehicle_id', '')))
             conn.commit()
 
         self.enqueue_mutation(

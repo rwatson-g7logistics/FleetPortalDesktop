@@ -21,6 +21,7 @@ from utils.pdf_builder import create_service_report_pdf
 from utils.date_picker import DatePickerEdit
 from config import SUBFOLDER_SERVICE_REPORTS
 from cloud_sync import upload_file_to_drive_sync
+from utils.telemetry_sync import link_brake_spinboxes
 
 
 class ServiceFormView(QWidget):
@@ -143,6 +144,7 @@ class ServiceFormView(QWidget):
         self.chk_tires = QCheckBox("Tires")
         self.chk_brakes = QCheckBox("Brakes")
         self.chk_repair = QCheckBox("General Repair / Other")
+        self.chk_tires.toggled.connect(self.toggle_tire_section)
 
         # Row 0: Scheduled PM & Diagnostics
         svc_grid.addWidget(self.chk_type_a, 0, 0)
@@ -179,36 +181,154 @@ class ServiceFormView(QWidget):
         self.spin_cost.setStyleSheet("background-color: #313244; color: #CDD6F4; border-radius: 6px; padding-left: 8px;")
         row_c.addWidget(self.spin_cost, stretch=1)
 
+        row_c.addWidget(QLabel("Payment Route:"))
+        self.cmb_payment_route = QComboBox()
+        self.cmb_payment_route.addItems(["Provider", "Out of Pocket", "Insurance"])
+        self.cmb_payment_route.setFixedHeight(35)
+        self.cmb_payment_route.setStyleSheet("background-color: #313244; color: #CDD6F4; border-radius: 6px; padding-left: 8px;")
+        row_c.addWidget(self.cmb_payment_route, stretch=1)
+
         core_layout.addLayout(row_c)
         layout.addWidget(grp_core)
 
-        # --- 2. DYNAMIC TIRE DETAILS (EXPANDABLE) ---
-        self.grp_tires = QGroupBox("🛞 Dynamic Tire Details")
-        self.grp_tires.setVisible(False)
-        self.grp_tires.setStyleSheet(grp_core.styleSheet())
-        tire_layout = QVBoxLayout(self.grp_tires)
+        # --- 2. COMPONENT WEAR & INSPECTION TELEMETRY ---
+        grp_wear = QGroupBox("2. Component Wear & Inspection Telemetry")
+        grp_wear.setStyleSheet(grp_core.styleSheet())
+        wear_layout = QVBoxLayout(grp_wear)
+        wear_layout.setSpacing(12)
 
-        t_row = QHBoxLayout()
-        t_row.addWidget(QLabel("Tires Replaced:"))
+        # A. 4-Corner Tread Depths (32nds)
+        tread_frame = QFrame()
+        tread_frame.setStyleSheet("background-color: #181825; border: 1px solid #313244; border-radius: 6px;")
+        tread_layout = QHBoxLayout(tread_frame)
+        tread_layout.setContentsMargins(12, 8, 12, 8)
+        tread_layout.setSpacing(10)
+
+        lbl_tread_title = QLabel("<b>Tread Depth (32nds):</b>")
+        lbl_tread_title.setStyleSheet("color: #89B4FA; border: none;")
+        tread_layout.addWidget(lbl_tread_title)
+
+        spin_style = "background-color: #313244; color: #CDD6F4; border: 1px solid #45475A; border-radius: 4px; padding-left: 4px;"
+
+        self.spin_tread_df = QSpinBox()
+        self.spin_tread_pf = QSpinBox()
+        self.spin_tread_dr = QSpinBox()
+        self.spin_tread_pr = QSpinBox()
+
+        for sp, name in [
+            (self.spin_tread_df, "DF:"), (self.spin_tread_pf, "PF:"),
+            (self.spin_tread_dr, "DR:"), (self.spin_tread_pr, "PR:")
+        ]:
+            sp.setRange(0, 20)
+            sp.setValue(10)
+            sp.setSuffix(" /32\"")
+            sp.setFixedHeight(30)
+            sp.setFixedWidth(75)
+            sp.setStyleSheet(spin_style)
+            lbl = QLabel(name)
+            lbl.setStyleSheet("color: #CDD6F4; border: none; font-weight: bold;")
+            tread_layout.addWidget(lbl)
+            tread_layout.addWidget(sp)
+
+        tread_layout.addStretch()
+        wear_layout.addWidget(tread_frame)
+
+        # B. Tire Replacement Details (Container toggled by "Tires" checkbox)
+        self.frame_tire_replace = QFrame()
+        self.frame_tire_replace.setStyleSheet("background-color: #181825; border: 1px dashed #45475A; border-radius: 6px;")
+        self.frame_tire_replace.setVisible(False)
+        tire_rep_lay = QHBoxLayout(self.frame_tire_replace)
+        tire_rep_lay.setContentsMargins(12, 8, 12, 8)
+        tire_rep_lay.setSpacing(12)
+
+        lbl_rep_title = QLabel("<b>🛞 Replaced Tires:</b>")
+        lbl_rep_title.setStyleSheet("color: #A6E3A1; border: none;")
+        tire_rep_lay.addWidget(lbl_rep_title)
+
         self.spin_tire_cnt = QSpinBox()
         self.spin_tire_cnt.setRange(1, 4)
         self.spin_tire_cnt.setValue(2)
-        self.spin_tire_cnt.setFixedHeight(35)
-        self.spin_tire_cnt.setStyleSheet("background-color: #313244; color: #CDD6F4; border-radius: 6px; padding-left: 8px;")
-        t_row.addWidget(self.spin_tire_cnt)
+        self.spin_tire_cnt.setFixedHeight(30)
+        self.spin_tire_cnt.setStyleSheet(spin_style)
+        tire_rep_lay.addWidget(QLabel("Qty:"))
+        tire_rep_lay.addWidget(self.spin_tire_cnt)
 
-        t_row.addWidget(QLabel("Positions Changed:"))
-        self.chk_pos_df = QCheckBox("Driver Front (DF)")
-        self.chk_pos_pf = QCheckBox("Passenger Front (PF)")
-        self.chk_pos_dr = QCheckBox("Driver Rear (DR)")
-        self.chk_pos_pr = QCheckBox("Passenger Rear (PR)")
-
+        self.chk_pos_df = QCheckBox("DF")
+        self.chk_pos_pf = QCheckBox("PF")
+        self.chk_pos_dr = QCheckBox("DR")
+        self.chk_pos_pr = QCheckBox("PR")
         for pos in [self.chk_pos_df, self.chk_pos_pf, self.chk_pos_dr, self.chk_pos_pr]:
-            pos.setStyleSheet("color: #CDD6F4;")
-            t_row.addWidget(pos)
+            pos.setStyleSheet("color: #CDD6F4; border: none;")
+            tire_rep_lay.addWidget(pos)
 
-        tire_layout.addLayout(t_row)
-        layout.addWidget(self.grp_tires)
+        tire_rep_lay.addStretch()
+        wear_layout.addWidget(self.frame_tire_replace)
+
+        # C. Brake Life & Rotor Condition
+        brake_frame = QFrame()
+        brake_frame.setStyleSheet("background-color: #181825; border: 1px solid #313244; border-radius: 6px;")
+        brake_layout = QHBoxLayout(brake_frame)
+        brake_layout.setContentsMargins(12, 8, 12, 8)
+        brake_layout.setSpacing(10)
+
+        lbl_brake_title = QLabel("<b>Brakes & Rotors:</b>")
+        lbl_brake_title.setStyleSheet("color: #89B4FA; border: none;")
+        brake_layout.addWidget(lbl_brake_title)
+
+        # Front Brakes
+        self.spin_brake_f_mm = QSpinBox()
+        self.spin_brake_f_mm.setRange(0, 20)
+        self.spin_brake_f_mm.setValue(10)
+        self.spin_brake_f_mm.setSuffix(" mm")
+        self.spin_brake_f_mm.setFixedHeight(30)
+        self.spin_brake_f_mm.setStyleSheet(spin_style)
+
+        self.spin_brake_f_pct = QSpinBox()
+        self.spin_brake_f_pct.setRange(0, 100)
+        self.spin_brake_f_pct.setValue(90)
+        self.spin_brake_f_pct.setSuffix(" %")
+        self.spin_brake_f_pct.setFixedHeight(30)
+        self.spin_brake_f_pct.setStyleSheet(spin_style)
+
+        brake_layout.addWidget(QLabel("Front:"))
+        brake_layout.addWidget(self.spin_brake_f_mm)
+        brake_layout.addWidget(self.spin_brake_f_pct)
+
+        # Rear Brakes
+        self.spin_brake_r_mm = QSpinBox()
+        self.spin_brake_r_mm.setRange(0, 20)
+        self.spin_brake_r_mm.setValue(10)
+        self.spin_brake_r_mm.setSuffix(" mm")
+        self.spin_brake_r_mm.setFixedHeight(30)
+        self.spin_brake_r_mm.setStyleSheet(spin_style)
+
+        self.spin_brake_r_pct = QSpinBox()
+        self.spin_brake_r_pct.setRange(0, 100)
+        self.spin_brake_r_pct.setValue(90)
+        self.spin_brake_r_pct.setSuffix(" %")
+        self.spin_brake_r_pct.setFixedHeight(30)
+        self.spin_brake_r_pct.setStyleSheet(spin_style)
+
+        brake_layout.addWidget(QLabel("Rear:"))
+        brake_layout.addWidget(self.spin_brake_r_mm)
+        brake_layout.addWidget(self.spin_brake_r_pct)
+
+        # Rotors
+        self.cmb_rotors = QComboBox()
+        self.cmb_rotors.addItems(["Good", "Turned / Resurfaced", "Grooved / Glazed", "Replaced", "Excessive Wear"])
+        self.cmb_rotors.setFixedHeight(30)
+        self.cmb_rotors.setStyleSheet(spin_style)
+        brake_layout.addWidget(QLabel("Rotors:"))
+        brake_layout.addWidget(self.cmb_rotors)
+
+        brake_layout.addStretch()
+        wear_layout.addWidget(brake_frame)
+
+        # Wire Two-Way Bi-Directional MM <-> % Converters
+        link_brake_spinboxes(self.spin_brake_f_mm, self.spin_brake_f_pct)
+        link_brake_spinboxes(self.spin_brake_r_mm, self.spin_brake_r_pct)
+
+        layout.addWidget(grp_wear)
 
         # --- 3. REPAIR DETAILS & ATTACHMENTS ---
         grp_details = QGroupBox("2. Technical Description & Files")
@@ -261,8 +381,9 @@ class ServiceFormView(QWidget):
         main_layout.addWidget(scroll_area)
 
     def toggle_tire_section(self, checked: bool) -> None:
-        """Dynamically shows or hides the tire specification group box."""
-        self.grp_tires.setVisible(checked)
+        """Dynamically reveals tire replacement quantities and position selectors."""
+        if hasattr(self, 'frame_tire_replace'):
+            self.frame_tire_replace.setVisible(checked)
 
     def populate_vendors(self) -> None:
         """Loads vendor choices into the dropdown from local SQLite cache."""
@@ -324,9 +445,19 @@ class ServiceFormView(QWidget):
             "vendor": self.cmb_vendor.currentText(),
             "invoice_num": invoice,
             "cost": self.spin_cost.value(),
+            "payment_route": self.cmb_payment_route.currentText() if hasattr(self, 'cmb_payment_route') else "Provider",
             "notes": f"ISSUE: {issue}\nREPAIR: {repair}",
             "tire_count": tire_cnt,
-            "tire_positions": pos_str
+            "tire_positions": pos_str,
+            "tread_df": self.spin_tread_df.value(),
+            "tread_pf": self.spin_tread_pf.value(),
+            "tread_dr": self.spin_tread_dr.value(),
+            "tread_pr": self.spin_tread_pr.value(),
+            "brake_front_mm": self.spin_brake_f_mm.value(),
+            "brake_front_pct": self.spin_brake_f_pct.value(),
+            "brake_rear_mm": self.spin_brake_r_mm.value(),
+            "brake_rear_pct": self.spin_brake_r_pct.value(),
+            "rotor_condition": self.cmb_rotors.currentText()
         }
         self.db.save_service_record(service_data)
 

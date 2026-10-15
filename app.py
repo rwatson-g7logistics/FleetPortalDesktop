@@ -21,9 +21,11 @@ from utils.platform_helper import get_default_font_family
 from views.fleet_view import FleetView
 from views.inventory_view import InventoryView
 from views.vehicle_profile import VehicleProfileView
+from views.unit_service_view import UnitServiceView
 from views.service_view import ServiceFormView
 from views.cost_center import CostCenterView
 from views.document_center import DocumentCenterView
+
 
 
 class FleetPortalApp(QMainWindow):
@@ -68,7 +70,7 @@ class FleetPortalApp(QMainWindow):
         lbl_title.setStyleSheet("color: #89B4FA; margin-bottom: 20px;")
         sidebar_layout.addWidget(lbl_title)
 
-        self.btn_fleet = QPushButton("📊 Fleet Command")
+        self.btn_fleet = QPushButton("📊 Fleet Overview")
         self.btn_cost = QPushButton("💰 Cost Center")
         self.btn_inventory = QPushButton("📦 Parts & Inventory")
         self.btn_docs = QPushButton("📁 Document Center")
@@ -147,6 +149,7 @@ class FleetPortalApp(QMainWindow):
 
         self.fleet_view = FleetView(self.db)
         self.fleet_view.vehicle_selected.connect(self.open_vehicle_profile)
+        self.fleet_view.service_hub_requested.connect(self.show_unit_service_hub)
         self.fleet_view.data_mutated.connect(self.trigger_upstream_push)
 
         self.cost_center_view = CostCenterView(self.db)
@@ -197,6 +200,15 @@ class FleetPortalApp(QMainWindow):
                         color: #89B4FA;
                     }
                 """)
+
+    def show_unit_service_hub(self, vehicle_id: str) -> None:
+        self.cleanup_dynamic_views()
+        service_hub_view = UnitServiceView(self.db, vehicle_id)
+        service_hub_view.back_requested.connect(lambda: self.switch_view(0))
+        service_hub_view.log_service_requested.connect(self.open_service_form)
+        idx = self.content_stack.addWidget(service_hub_view)
+        self.dynamic_views.append(service_hub_view)
+        self.content_stack.setCurrentIndex(idx)
 
     def open_vehicle_profile(self, vehicle_id: str) -> None:
         self.cleanup_dynamic_views()

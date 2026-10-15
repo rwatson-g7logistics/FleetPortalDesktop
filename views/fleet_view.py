@@ -31,6 +31,7 @@ from utils.date_picker import DatePickerEdit
 from utils.rental_lifecycle import (
     evaluate_rental_compliance, ExtendRentalDialog, check_and_auto_retire_rentals
 )
+from utils.service_tracker import evaluate_vehicle_health
 
 # --- CLOUD SYNC & FOLDER CONSTANTS ---
 from cloud_sync import upload_file_to_drive_sync, sync_unit_to_fpd_sheet
@@ -647,6 +648,7 @@ class FleetView(QWidget):
 
     vehicle_selected = Signal(str)
     data_mutated = Signal()
+    service_hub_requested = Signal(str)
 
     def __init__(self, db_manager: DatabaseManager, parent=None):
         super().__init__(parent)
@@ -663,7 +665,7 @@ class FleetView(QWidget):
 
         # --- 1. HEADER BAR & CONTROLS ---
         header_layout = QHBoxLayout()
-        lbl_title = QLabel("📊 Fleet Command Center")
+        lbl_title = QLabel("📊 Fleet Overview")
         lbl_title.setFont(QFont(get_default_font_family(), 18, QFont.Weight.Bold))
         lbl_title.setStyleSheet("color: #CDD6F4;")
         header_layout.addWidget(lbl_title)
@@ -704,6 +706,32 @@ class FleetView(QWidget):
         header_layout.addWidget(self.btn_refresh)
 
         main_layout.addLayout(header_layout)
+
+        # --- 1B. KPI TELEMETRY BANNER ---
+        kpi_frame = QFrame()
+        kpi_frame.setStyleSheet("background-color: #181825; border: 1px solid #313244; border-radius: 8px;")
+        kpi_layout = QHBoxLayout(kpi_frame)
+        kpi_layout.setContentsMargins(16, 10, 16, 10)
+        kpi_layout.setSpacing(24)
+
+        self.lbl_kpi_health = QLabel("Fleet Health: —")
+        self.lbl_kpi_health.setFont(QFont(get_default_font_family(), 12, QFont.Weight.Bold))
+        self.lbl_kpi_health.setStyleSheet("color: #A6E3A1; border: none;")
+
+        self.lbl_kpi_cameras = QLabel("Cameras Installed: —")
+        self.lbl_kpi_cameras.setFont(QFont(get_default_font_family(), 12, QFont.Weight.Bold))
+        self.lbl_kpi_cameras.setStyleSheet("color: #89B4FA; border: none;")
+
+        self.lbl_kpi_rentals = QLabel("Active Rentals: —")
+        self.lbl_kpi_rentals.setFont(QFont(get_default_font_family(), 12, QFont.Weight.Bold))
+        self.lbl_kpi_rentals.setStyleSheet("color: #F9E2AF; border: none;")
+
+        kpi_layout.addWidget(self.lbl_kpi_health)
+        kpi_layout.addWidget(self.lbl_kpi_cameras)
+        kpi_layout.addWidget(self.lbl_kpi_rentals)
+        kpi_layout.addStretch()
+
+        main_layout.addWidget(kpi_frame)
 
         # --- 2. FILTER & SEARCH BAR ---
         filter_frame = QFrame()
@@ -773,7 +801,37 @@ class FleetView(QWidget):
         """Runs automated lifecycle checks, loads vehicle records, and updates the table view."""
         check_and_auto_retire_rentals(self.db, parent_widget=self)
         self.vehicles_df = self.db.get_all_vehicles()
+        self.update_kpi_banner()
         self.apply_filters()
+
+    def update_kpi_banner(self) -> None:
+        """Calculates live fleet health, camera compliance, and rental metrics."""
+        if self.vehicles_df.empty:
+            self.lbl_kpi_health.setText("Fleet Health: 0/0 (0%)")
+            self.lbl_kpi_cameras.setText("Cameras: 0/0 (0%)")
+            self.lbl_kpi_rentals.setText("Active Rentals: 0")
+            return
+
+        df = self.vehicles_df
+        total_units = len(df)
+        active_units = len(df[df['status'].astype(str).str.lower() == 'active'])
+        health_pct = int((active_units / total_units) * 100) if total_units > 0 else 0
+
+        # Cameras installed on active units
+        active_df = df[df['status'].astype(str).str.lower() == 'active']
+        cams_installed = len(active_df[active_df['camera_status'].astype(str).str.lower().isin(['yes', 'y'])])
+        cam_pct = int((cams_installed / len(active_df)) * 100) if not active_df.empty else 0
+
+        # Rentals count (Temp or rental provider)
+        rental_providers = ["u-haul", "budget", "enterprise", "lmr", "hertz"]
+        rentals_count = len(df[
+            (df['unit_type'].astype(str).str.lower() == 'temp') |
+            (df['provider'].astype(str).str.lower().isin(rental_providers))
+        ])
+
+        self.lbl_kpi_health.setText(f"Fleet Health: {active_units}/{total_units} Active ({health_pct}%)")
+        self.lbl_kpi_cameras.setText(f"Cameras: {cams_installed}/{len(active_df)} Installed ({cam_pct}%)")
+        self.lbl_kpi_rentals.setText(f"Active Rentals: {rentals_count}")
 
     def sync_from_cloud_with_feedback(self) -> None:
         """Pulls authoritative data from Google Sheets, updates SQLite, and shows status feedback."""
@@ -862,14 +920,11 @@ class FleetView(QWidget):
             reg_val = str(row_data.get('registration', ''))
             ins_val = str(row_data.get('insurance', ''))
 
-            # PM Status Calculation
-            diff = mileage - last_a
-            if diff >= interval:
-                svc_status = f"🔴 {diff - interval:,}m Overdue"
-            elif diff >= (interval - 500):
-                svc_status = f"🟡 {interval - diff:,}m Due Soon"
-            else:
-                svc_status = f"🟢 {interval - diff:,}m Left"
+            # Multi-point Service Status Tracking (Oil, Tires, Brakes, Alignment)
+            health_eval = evaluate_vehicle_health(row_data.to_dict(), self.db)
+            svc_status = health_eval['badge']
+            svc_color = health_eval['color']
+            svc_tooltip = health_eval['tooltip']
 
             # Compliance Tracker: Standardized Return Date & Document Expiration for ALL Units
             tooltip_lines = []
@@ -929,22 +984,36 @@ class FleetView(QWidget):
             item_mil.setFlags(item_mil.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.table.setItem(row_idx, 6, item_mil)
 
-            self.table.setItem(row_idx, 7, QTableWidgetItem(svc_status))
+            item_svc = QTableWidgetItem(svc_status)
+            item_svc.setForeground(QColor(svc_color))
+            item_svc.setToolTip(svc_tooltip)
+            font_svc = item_svc.font()
+            font_svc.setUnderline(True)
+            item_svc.setFont(font_svc)
+            self.table.setItem(row_idx, 7, item_svc)
             self.table.setItem(row_idx, 8, QTableWidgetItem(str(row_data.get('restrictions', 'Clear'))))
             self.table.setItem(row_idx, 9, comp_item)
 
     def handle_cell_click(self, row: int, col: int) -> None:
-        """Single click on column 9 (Compliance / Return) opens Extend Rental dialog."""
+        """Routes single-clicks: opens service telemetry on col 7, rental extension on col 9."""
+        item_vid = self.table.item(row, 0)
+        if not item_vid:
+            return
+        vid = str(item_vid.data(Qt.ItemDataRole.UserRole) or item_vid.text()).strip()
+
+        print(f"[CLICK DEBUG] Row={row}, Col={col}, VID={vid}")
+
+        # Column 7: Service Status -> Open Dedicated Service Telemetry Hub
+        if col == 7:
+            print(f"[CLICK DEBUG] Emitting service_hub_requested for {vid}")
+            self.service_hub_requested.emit(vid)
+            return
+
+        # Column 9: Compliance / Return Date
         if col == 9:
-            item_vid = self.table.item(row, 0)
-            vid = str(item_vid.data(Qt.ItemDataRole.UserRole) or item_vid.text() if item_vid else "")
-            
-            # Find matching vehicle dictionary
             matches = self.vehicles_df[self.vehicles_df['vehicle_id'] == vid]
             if not matches.empty:
                 v_data = matches.iloc[0].to_dict()
-                
-                # Open extension/return dialog for any unit that has a scheduled return date
                 ret_val = str(v_data.get('return_date', '')).strip()
                 unit_type = str(v_data.get('unit_type', ''))
                 if ret_val or unit_type == 'Temp':

@@ -247,7 +247,7 @@ def retire_unit_cloud(unit_id: str, retire_data: dict) -> tuple[bool, str]:
             # Auto-align header row if it is missing columns
             current_headers = retired_ws.row_values(1)
             if current_headers != retired_headers:
-                retired_ws.update('A1:N1', [retired_headers])
+                retired_ws.update([retired_headers], 'A1:N1')
         else:
             file_meta = {
                 'name': retired_sheet_name,
@@ -609,14 +609,36 @@ def upload_file_to_drive_sync(
         mime = 'application/pdf' if ext == '.pdf' else 'application/octet-stream'
         media = MediaFileUpload(local_filepath, mimetype=mime, resumable=True)
 
-        file_obj = service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id, webViewLink, name'
-        ).execute()
+        # Check if file with exact name already exists in target folder
+        query_file = (
+            f"name = '{drive_filename}' and "
+            f"'{target_parent_id}' in parents and "
+            f"trashed = false"
+        )
+        res_file = service.files().list(q=query_file, spaces='drive', fields='files(id, webViewLink)').execute()
+        existing_files = res_file.get('files', [])
 
-        link = file_obj.get('webViewLink', '')
-        return True, link, ""
+        if existing_files:
+            # Overwrite existing file in-place on Google Drive
+            file_id = existing_files[0]['id']
+            file = service.files().update(
+                fileId=file_id,
+                media_body=media,
+                fields='id, webViewLink'
+            ).execute()
+        else:
+            # Create new file if it does not exist yet
+            file_metadata = {
+                'name': drive_filename,
+                'parents': [target_parent_id]
+            }
+            file = service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields='id, webViewLink'
+            ).execute()
+
+        return True, file.get('webViewLink', ''), ""
 
     except Exception as err:
         return False, "", str(err)

@@ -2,8 +2,8 @@
 FleetPortalDesktop/utils/qr_helper.py
 -------------------------------------
 Unified QR Code Engine and Dialog for G7 Fleet Portal Desktop.
-Contains VIN sanitization, HTML-to-PDF grid generation, Google Drive upload,
-and the unified interactive QR Generator modal (Single, Multi-select, Custom Paste).
+Contains VIN sanitization, HTML-to-PDF grid generation (4-across, 1.4" x 1.4" labels),
+Google Drive cloud sync, and the unified interactive QR Generator modal.
 """
 
 import re
@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import qrcode
+from qrcode.constants import ERROR_CORRECT_M
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QTextDocument
@@ -25,7 +26,7 @@ from PySide6.QtWidgets import (
 from cloud_sync import upload_file_to_drive_sync
 from config import SUBFOLDER_QR_CODES
 from db_manager import DatabaseManager
-from utils.platform_helper import get_default_font_family
+from utils.platform_helper import get_default_font_family, get_app_data_directory
 
 
 # =====================================================================
@@ -44,55 +45,115 @@ def clean_vin(raw_vin: str) -> str:
 
 def export_grid_to_pdf(items: List[Dict[str, str]], default_filename: str, parent_widget: Optional[QWidget] = None) -> str:
     """
-    Renders items into an HTML 4x4 table, compiles to PDF, and uploads
-    directly to the isolated FPD / QR Codes Google Drive folder.
+    Renders items into an HTML 4-across grid formatted for 1.4" x 1.4" sticker badges,
+    compiles to PDF via QPrinter, preserves the local file in FPD / QR Codes,
+    and uploads to the isolated FPD / QR Codes Google Drive folder.
     """
+    # 1. Resolve Local Output Directory & Filepath
+    qr_dir = get_app_data_directory() / SUBFOLDER_QR_CODES
+    os.makedirs(qr_dir, exist_ok=True)
+    pdf_path = str(qr_dir / default_filename)
+
+    # 2. Base HTML & CSS Setup (4 Columns, 1.4" x 1.4" Envelope, 24 Labels Per Page)
     html = """
     <html>
     <head>
         <style>
-            body { font-family: Helvetica, Arial, sans-serif; background: #fff; color: #000; }
-            h1 { text-align: center; font-size: 18pt; margin-bottom: 20px; }
-            table { width: 100%; border-collapse: collapse; }
-            td { text-align: center; vertical-align: middle; padding: 20px; width: 25%; border: 1px dashed #ccc; }
-            .vid { font-size: 14pt; font-weight: bold; margin-bottom: 8px; color: #111; }
-            .vin { font-size: 8pt; color: #555; margin-top: 5px; font-family: monospace; }
-            img { width: 140px; height: 140px; }
+            @page {
+                size: letter;
+                margin: 0.35in;
+            }
+            body {
+                font-family: Arial, Helvetica, sans-serif;
+                margin: 0;
+                padding: 0;
+                background-color: #ffffff;
+            }
+            table {
+                width: 100%;
+                border-collapse: separate;
+                border-spacing: 6px;
+            }
+            tr {
+                page-break-inside: avoid;
+            }
+            td {
+                width: 25%;
+                vertical-align: top;
+                text-align: center;
+                padding: 2px;
+            }
+            .badge {
+                border: 1px solid #45475A;
+                border-radius: 6px;
+                padding: 6px 4px;
+                background-color: #ffffff;
+                text-align: center;
+            }
+            .vid {
+                font-size: 9pt;
+                font-weight: bold;
+                color: #11111B;
+                margin-bottom: 3px;
+            }
+            img {
+                width: 95px;
+                height: 95px;
+                display: block;
+                margin: 0 auto;
+            }
+            .vin {
+                font-size: 6pt;
+                font-family: "Courier New", Courier, monospace;
+                font-weight: bold;
+                color: #313244;
+                margin-top: 3px;
+            }
         </style>
     </head>
     <body>
-        <h1>G7 Fleet Command — VIN QR Code Labels</h1>
         <table>
     """
 
-    temp_files_to_cleanup = []
+    temp_images_to_cleanup = []
     col_count = 0
     html += "<tr>"
 
+    # 3. Build Label Grid
     for item in items:
-        vid = item.get('vehicle_id', '')
+        raw_uid = str(item.get('vehicle_id', '') or item.get('unit_id', '')).strip()
+        display_uid = raw_uid.split('_')[-1]
         raw_vin = item.get('vin', '')
         vin = clean_vin(raw_vin)
 
         if not vin:
             continue
 
-        qr = qrcode.QRCode(version=1, box_size=8, border=1)
+        # Generate Scannable QR Matrix
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=ERROR_CORRECT_M,
+            box_size=6,
+            border=1
+        )
         qr.add_data(vin)
         qr.make(fit=True)
         img_qr = qr.make_image(fill_color="black", back_color="white")
 
-        fd, tmp_path = tempfile.mkstemp(suffix='.png')
+        fd, tmp_png = tempfile.mkstemp(suffix='.png')
         os.close(fd)
-        with open(tmp_path, "wb") as f_out:
+        with open(tmp_png, "wb") as f_out:
             img_qr.save(f_out)
-        temp_files_to_cleanup.append(tmp_path)
+        temp_images_to_cleanup.append(tmp_png)
 
+        # 1.4" x 1.4" Label Badge Layout
         html += f"""
             <td>
-                <div class="vid">{vid}</div>
-                <img src="{tmp_path}" />
-                <div class="vin">{vin}</div>
+                <div class="badge">
+                    <div class="vid">UNIT {display_uid}</div>
+                    <img src="{tmp_png}" />
+                    <div class="vin">{vin}</div>
+                </div>
             </td>
         """
 
@@ -100,16 +161,15 @@ def export_grid_to_pdf(items: List[Dict[str, str]], default_filename: str, paren
         if col_count % 4 == 0:
             html += "</tr><tr>"
 
-    while col_count % 4 != 0:
-        html += "<td></td>"
-        col_count += 1
+    # Fill remaining columns in the final row to preserve table geometry
+    if col_count % 4 != 0:
+        while col_count % 4 != 0:
+            html += "<td></td>"
+            col_count += 1
 
     html += "</tr></table></body></html>"
 
-    pdf_fd, pdf_path = tempfile.mkstemp(suffix='.pdf')
-    os.close(pdf_fd)
-    temp_files_to_cleanup.append(pdf_path)
-
+    # 4. Compile HTML Document to Native PDF
     printer = QPrinter(QPrinter.PrinterMode.HighResolution)
     printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
     printer.setOutputFileName(pdf_path)
@@ -118,31 +178,34 @@ def export_grid_to_pdf(items: List[Dict[str, str]], default_filename: str, paren
     doc.setHtml(html)
     doc.print_(printer)
 
+    # 5. Clean Up Temporary PNG Images
+    for p in temp_images_to_cleanup:
+        try:
+            Path(p).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    # 6. Upload Compiled PDF to Google Drive
     success, web_link, err_msg = upload_file_to_drive_sync(
         local_filepath=pdf_path,
         drive_filename=default_filename,
         subfolder_name=SUBFOLDER_QR_CODES
     )
 
-    for p in temp_files_to_cleanup:
-        try:
-            Path(p).unlink()
-        except OSError:
-            pass
-
+    # 7. Feedback Notification
     if parent_widget:
         if success:
             QMessageBox.information(
                 parent_widget,
                 "Google Drive Sync Complete",
-                f"✅ QR Code Sheet uploaded to Google Drive successfully!\n\n"
+                f"✅ QR Code Sheet generated and uploaded successfully!\n\n"
                 f"File: {default_filename}\n\nLink: {web_link}"
             )
         else:
             QMessageBox.warning(
                 parent_widget,
                 "Google Drive Sync Warning",
-                f"🚨 Failed to upload QR Sheet to Google Drive.\n\n"
+                f"⚠️ QR Sheet saved locally, but failed to upload to Google Drive.\n\n"
                 f"Details: {err_msg}"
             )
 
@@ -244,9 +307,17 @@ class QRGeneratorDialog(QDialog):
         if df.empty:
             return
 
-        self.tbl_units.setRowCount(len(df))
-        for row_idx, (_, row) in enumerate(df.iterrows()):
-            vid = str(row.get('vehicle_id', ''))
+        # Sort roster numerically by Unit ID
+        def sort_key(row):
+            uid = str(row.get('unit_id') or str(row.get('vehicle_id', '')).split('_')[-1])
+            return int(uid) if uid.isdigit() else 999999
+
+        records = df.to_dict('records')
+        records.sort(key=sort_key)
+
+        self.tbl_units.setRowCount(len(records))
+        for row_idx, row in enumerate(records):
+            vid = str(row.get('unit_id') or str(row.get('vehicle_id', '')).split('_')[-1])
             vin = clean_vin(str(row.get('vin', '')))
 
             item_chk = QTableWidgetItem()
@@ -272,16 +343,19 @@ class QRGeneratorDialog(QDialog):
         for r in range(self.tbl_units.rowCount()):
             chk = self.tbl_units.item(r, 0)
             if chk and chk.checkState() == Qt.CheckState.Checked:
-                vid = self.tbl_units.item(r, 1).text()
-                vin = self.tbl_units.item(r, 2).text()
-                if vin:
-                    selected_items.append({"vehicle_id": vid, "vin": vin})
+                item_vid = self.tbl_units.item(r, 1)
+                item_vin = self.tbl_units.item(r, 2)
+                if item_vid and item_vin:
+                    vid = item_vid.text().strip()
+                    vin = item_vin.text().strip()
+                    if vin:
+                        selected_items.append({"vehicle_id": vid, "vin": vin})
 
         if not selected_items:
             QMessageBox.warning(self, "No Units Selected", "Select at least one unit.")
             return
 
-        export_grid_to_pdf(selected_items, "Fleet_Selected_QR_Labels.pdf", parent_widget=self)
+        export_grid_to_pdf(selected_items, "Master_Fleet_QR_Labels.pdf", parent_widget=self)
 
     def init_single_tab(self) -> None:
         tab_layout = QVBoxLayout(self.tab_single)
@@ -296,6 +370,7 @@ class QRGeneratorDialog(QDialog):
 
         tab_layout.addWidget(QLabel("VIN (17 Characters):"))
         self.txt_single_vin = QLineEdit()
+        self.txt_single_vin.setMaxLength(17)
         self.txt_single_vin.setFixedHeight(32)
         self.txt_single_vin.setStyleSheet("background-color: #313244; color: #CDD6F4; border-radius: 5px; padding-left: 8px;")
         tab_layout.addWidget(self.txt_single_vin)

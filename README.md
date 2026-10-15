@@ -128,37 +128,18 @@ python -c "from db_manager import DatabaseManager; db = DatabaseManager(); print
 * Purge Specific Test Make/Model Combinations:
 python -c "from db_manager import DatabaseManager; db = DatabaseManager(); conn = db.get_connection(); conn.cursor().execute(\"DELETE FROM lookup_make_models WHERE make = 'TestMake' AND model = 'TestModel'\"); conn.commit(); print('Cleaned lookup_make_models.')"
 
-
-
 ---
 
-### Critical Codebase Issues Identified During Ingestion
+## Project Status & Development Roadmap
 
-Auditing the dropped files against `data/fleet_portal_cache.db` revealed several critical blockers preventing the app from launching or saving data:
+### Active Modules (Phase 1 — Locked In)
+* **Fleet Command Center (`views/fleet_view.py`):** Multi-variable search, dynamic status filtering, intake validation (17-char VIN, duplicate safeguards, leading-zero lockout), inline odometer editing with immediate cloud write-through, and compliance decay warnings.
+* **Cloud & Persistence Engine (`cloud_sync.py`, `db_manager.py`):** Bidirectional sync between SQLite cache and Google Sheets (`FPD_Master_Sheet` and `FPD_Retired_Sheet`), in-place Google Drive file updating, and PAVE document routing.
+* **Label & QR Automation (`utils/qr_helper.py`):** Consolidated 24-up label generator (1.4" × 1.4" badges, 4 columns) outputting to `Master_Fleet_QR_Labels.pdf` and synced to Drive.
 
-#### 1. Schema Primary Key Conflict (`vehicle_id` vs `unit_id`)
-
-* **Problem:** In the provided SQLite file `fleet_portal_cache.db`, the table definition is `master_vehicles(vehicle_id TEXT PRIMARY KEY, ...)`[cite: 17]. However, `db_manager.py` defines `CREATE TABLE master_vehicles(unit_id TEXT PRIMARY KEY, ...)`[cite: 5] and attempts `INSERT INTO master_vehicles (unit_id, ...)`[cite: 5].
-* **Impact:** Any query expecting `vehicle_id` (e.g., `fleet_view.py`[cite: 9], `vehicle_profile.py`[cite: 12], `cloud_sync.py`[cite: 3]) either fails with `no such column: vehicle_id` or returns empty fields.
-
-#### 2. SQL Column Count Mismatch in `db_manager.py`
-
-* **Problem:** In `DatabaseManager.save_vehicles_bulk`:
-  * Columns specified: 19 columns (`unit_id`, `provider`, `status`, `restrictions`, `location`, `camera_status`, `make`, `model`, `year`, `vin`, `plate`, `state`, `mileage`, `pave_insp`, `registration`, `insurance`, `size`, `service_interval`, `return_date`)[cite: 5].
-  * Value placeholders provided: 18 (`VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)[cite: 5].
-* **Impact:** `sqlite3.OperationalError` triggers immediately whenever `SyncWorker` attempts to cache vehicles locally[cite: 3, 5].
-
-#### 3. Uninstantiated Widgets & NameErrors in `AddUnitDialog` (`fleet_view.py`)
-
-* **Problem:**
-  * `AddUnitDialog.init_ui()` references `self.txt_year`, `self.txt_reg`, `self.txt_ins`, `self.txt_ret`, and `self.txt_pave` without initializing them as `QLineEdit` instances[cite: 9].
-  * `save_unit()` references an undefined variable `unit_id` (the input was assigned to `uid`)[cite: 9].
-  * `save_unit()` calls `self.db.save_vehicles_bulk(new_unit_df)` without defining `new_unit_df`[cite: 9].
-* **Impact:** Opening the "Add Unit" dialog crashes the UI with `AttributeError`; attempting to save crashes with `NameError`[cite: 9].
-
-#### 4. Missing Method in `db_manager.py`
-
-* **Problem:** `ServiceFormView.populate_vendors()` calls `self.db.get_vendor_list()`[cite: 11], but `DatabaseManager` does not implement `get_vendor_list()`[cite: 5].
-* **Impact:** Launching the service log view crashes with `AttributeError: 'DatabaseManager' object has no attribute 'get_vendor_list'`.
+### Target Milestone (Year-End Target / Pre-Peak Stability)
+- [ ] **Modular Deep Dive Hub (`views/vehicle_profile.py`):** Decouple layout into `utils/profile_card_builder.py`, direct PAVE / invoice PDF launch, and single-unit lifetime maintenance ledger export.
+- [ ] **Service Reporting Engine (`views/service_view.py`):** Standardize balanced 6-item service selector, diagnostic logging, tire position tracking, and auto-inventory deduction.
+- [ ] **Access & Security:** Role-based retirement signature auditing and idle session auto-lock.
 
 ---

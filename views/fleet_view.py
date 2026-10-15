@@ -759,6 +759,7 @@ class FleetView(QWidget):
         
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setStyleSheet("""
             QTableWidget { background-color: #1E1E2E; color: #CDD6F4; gridline-color: #313244; border: none; border-radius: 8px; }
             QHeaderView::section { background-color: #181825; color: #89B4FA; padding: 8px; font-weight: bold; border: none; border-right: 1px solid #313244; }
@@ -925,6 +926,7 @@ class FleetView(QWidget):
 
             item_mil = QTableWidgetItem(f"{mileage:,} mi")
             item_mil.setForeground(QColor("#89B4FA"))
+            item_mil.setFlags(item_mil.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.table.setItem(row_idx, 6, item_mil)
 
             self.table.setItem(row_idx, 7, QTableWidgetItem(svc_status))

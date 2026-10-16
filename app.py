@@ -307,9 +307,9 @@ class FleetPortalApp(QMainWindow):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100)
         
-        # Verify physical credential existence before flagging connection
-        if success and TOKEN_PATH.exists():
-            self.lbl_status.setText("Cloud Sync: Up to Date")
+        # Bind status strictly to verified credential validity, not mere file existence
+        if success:
+            self.lbl_status.setText(message)
             self.btn_auth.setText("✅ Google Connected")
             self.btn_auth.setStyleSheet("""
                 QPushButton {
@@ -321,28 +321,30 @@ class FleetPortalApp(QMainWindow):
                     font-size: 11px;
                 }
             """)
+            # Auto-drain queue and push any offline-created units upstream immediately
+            self.trigger_upstream_push()
         else:
-            self.lbl_status.setText("Local Cache Active (Offline)")
-            self.btn_auth.setText("🔑 Connect Google Account")
+            self.lbl_status.setText(message)
+            self.btn_auth.setText("🔑 Reconnect Google Account")
             self.btn_auth.setStyleSheet("""
                 QPushButton {
                     background-color: #313244;
-                    color: #89B4FA;
-                    border: 1px solid #45475A;
+                    color: #F9E2AF;
+                    border: 1px solid #F9E2AF;
                     border-radius: 6px;
                     font-weight: bold;
                     font-size: 11px;
+                }
+                QPushButton:hover {
+                    background-color: #45475A;
+                    color: #A6E3A1;
                 }
             """)
 
     def on_push_finished(self, success: bool, message: str) -> None:
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100)
-        if success:
-            self.lbl_status.setText("Cloud Sync: Up to Date")
-        else:
-            self.lbl_status.setText("Pending Upstream Push (Offline)")
-
+        self.lbl_status.setText(message)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

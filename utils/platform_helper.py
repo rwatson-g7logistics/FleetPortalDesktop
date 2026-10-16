@@ -3,12 +3,13 @@ FleetPortalDesktop/utils/platform_helper.py
 ------------------------
 Platform utility helper for G7 Fleet Command Center Desktop.
 Handles OS identification, cross-platform path resolution, 
-and system-specific configuration directories.
+and system-specific configuration directories, automatically sizes dropdown menus to match longest strings.
 """
 
 import sys
 import os
 from pathlib import Path
+from PySide6.QtWidgets import QComboBox
 
 
 def get_platform_name() -> str:
@@ -40,6 +41,25 @@ def get_app_data_directory() -> Path:
     app_dir.mkdir(parents=True, exist_ok=True)
     return app_dir
 
+def auto_size_combobox(combo: QComboBox, extra_padding: int = 55) -> int:
+    """
+    Calculates the exact pixel width of the longest string in a QComboBox using its
+    active font metrics and locks that width onto both the combobox and its popup view.
+    Accounts for dropdown arrows, inner margins, and macOS checkmark indicators.
+    """
+    combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+    fm = combo.fontMetrics()
+    max_text_width = 0
+    for i in range(combo.count()):
+        w = fm.horizontalAdvance(combo.itemText(i))
+        if w > max_text_width:
+            max_text_width = w
+
+    target_width = max(max_text_width + extra_padding, 140)
+    combo.setMinimumWidth(target_width)
+    if combo.view():
+        combo.view().setMinimumWidth(target_width)
+    return target_width
 
 def get_default_font_family() -> str:
     """Returns standard system fonts matching native OS aesthetics."""

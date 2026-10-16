@@ -8,6 +8,9 @@ and chassis alignment flags. Generates composite status badges and detailed tool
 
 from typing import Dict, Any, List, Tuple
 
+# impoerts from Utis 
+from utils.provider_sop import get_sop_for_provider
+
 
 def evaluate_vehicle_health(vehicle_data: Dict[str, Any], db_manager) -> Dict[str, Any]:
     """
@@ -27,8 +30,15 @@ def evaluate_vehicle_health(vehicle_data: Dict[str, Any], db_manager) -> Dict[st
     raw_mil = str(vehicle_data.get('mileage', 0)).replace(',', '').split('.')[0]
     current_mileage = int(raw_mil) if raw_mil.isdigit() else 0
 
-    raw_int = str(vehicle_data.get('service_interval', 7500)).split('.')[0]
-    oil_interval = int(raw_int) if raw_int.isdigit() else 7500
+    # Fetch vendor's dynamic SOP profile
+    prov_name = str(vehicle_data.get('provider', 'Other')).strip()
+    sop = get_sop_for_provider(prov_name, db_manager)
+    # Defaults if SOP is missing
+    oil_interval = int(sop.get('oil_pm_interval', 7500))
+    tire_target = int(sop.get('tire_reimburse_miles', 15000))
+    tire_alert_window = int(sop.get('tire_warning_window', 1000))
+    tire_early_alert = max(0, tire_target - tire_alert_window)
+    brake_interval = int(sop.get('brake_check_interval', 18000))
 
     # Fetch historical service logs from SQLite cache
     logs = []
@@ -67,7 +77,7 @@ def evaluate_vehicle_health(vehicle_data: Dict[str, Any], db_manager) -> Dict[st
     else:
         oil_line = f"• Oil PM: 🟢 {oil_remaining:,}m remaining"
 
-    # 2. Tires (15,000-Mile Provider Reimbursement Window)
+    # 2. Tires (Vendor-Specific Dynamic Reimbursement Window)
     last_tire_mileage = 0
     for l in logs:
         if 'tire' in str(l.get('service_type', '')).lower():
@@ -77,16 +87,16 @@ def evaluate_vehicle_health(vehicle_data: Dict[str, Any], db_manager) -> Dict[st
     tire_delta = current_mileage - last_tire_mileage if last_tire_mileage > 0 else current_mileage
     tire_status = "CLEAR"
 
-    if tire_delta >= 15000:
+    if tire_delta >= tire_target:
         tire_status = "REPLACE_DUE"
-        tire_line = f"• Tires: 🔴 {tire_delta:,}m on set (Provider Pay Threshold Reached @ 15k)"
-    elif tire_delta >= 14000:
+        tire_line = f"• Tires: 🔴 {tire_delta:,}m on set ({prov_name} Pay Threshold Reached @ {tire_target:,}m)"
+    elif tire_delta >= tire_early_alert:
         tire_status = "PROVIDER_WINDOW"
-        tire_line = f"• Tires: 🟡 {tire_delta:,}m on set (Eligible for Provider Pay @ 15k)"
+        tire_line = f"• Tires: 🟡 {tire_delta:,}m on set (Eligible for {prov_name} Pay @ {tire_target:,}m)"
     else:
-        tire_line = f"• Tires: 🟢 {tire_delta:,}m on set (15k threshold: {15000 - tire_delta:,}m left)"
+        tire_line = f"• Tires: 🟢 {tire_delta:,}m on set ({tire_target - tire_delta:,}m to {tire_target:,}m SOP)"
 
-    # 3. Brakes (18,000-Mile Lifecycle Check)
+    # 3. Brakes (Vendor-Specific Lifecycle Check)
     last_brake_mileage = 0
     for l in logs:
         if 'brake' in str(l.get('service_type', '')).lower():
@@ -96,14 +106,14 @@ def evaluate_vehicle_health(vehicle_data: Dict[str, Any], db_manager) -> Dict[st
     brake_delta = current_mileage - last_brake_mileage if last_brake_mileage > 0 else current_mileage
     brake_status = "CLEAR"
 
-    if brake_delta >= 22000:
+    if brake_delta >= (brake_interval + 3000):
         brake_status = "OVERDUE"
-        brake_line = f"• Brakes: 🔴 {brake_delta:,}m since last inspection (Exceeds 18k limit)"
-    elif brake_delta >= 18000:
+        brake_line = f"• Brakes: 🔴 {brake_delta:,}m since last inspection (Exceeds {brake_interval:,}m SOP)"
+    elif brake_delta >= brake_interval:
         brake_status = "DUE_SOON"
-        brake_line = f"• Brakes: 🟡 Pad Inspection Due ({brake_delta:,}m since last service)"
+        brake_line = f"• Brakes: 🟡 Pad Inspection Due ({brake_delta:,}m on pads; {brake_interval:,}m SOP)"
     else:
-        brake_line = f"• Brakes: 🟢 Last serviced {brake_delta:,}m ago (OK)"
+        brake_line = f"• Brakes: 🟢 Last checked {brake_delta:,}m ago (OK)"
 
     # 4. Alignment & Chassis Pulling Check
     restrictions = str(vehicle_data.get('restrictions', '')).lower()
@@ -211,15 +221,25 @@ def get_tire_position_telemetry(vehicle_id: str, current_mileage: int, db_manage
             miles_on_tire = current_mileage
             sop_installed_str = "Factory / Pre-tracking"
 
-        # 1. Provider SOP Reimbursement Status
-        if miles_on_tire >= 15000:
-            sop_badge = "🔴 Provider Pay Due (15k+)"
+        # 1. Dynamic Vendor SOP Reimbursement Status
+        with db_manager.get_connection() as conn:
+            v_cur = conn.cursor()
+            v_cur.execute("SELECT provider FROM master_vehicles WHERE vehicle_id = ? OR vehicle_id LIKE ?", (vehicle_id, f"%_{clean_uid}"))
+            v_row = v_cur.fetchone()
+            prov_tag = v_row['provider'] if v_row else 'Other'
+
+        v_sop = get_sop_for_provider(prov_tag, db_manager)
+        t_target = int(v_sop.get('tire_reimburse_miles', 15000))
+        t_early = max(0, t_target - int(v_sop.get('tire_warning_window', 1000)))
+
+        if miles_on_tire >= t_target:
+            sop_badge = f"🔴 {prov_tag} Pay Due ({t_target // 1000}k+)"
             sop_color = "#F38BA8"
-        elif miles_on_tire >= 14000:
-            sop_badge = "🟡 Provider Window (14k+)"
+        elif miles_on_tire >= t_early:
+            sop_badge = f"🟡 {prov_tag} Window ({t_early // 1000}k+)"
             sop_color = "#F9E2AF"
         else:
-            sop_badge = f"🟢 {15000 - miles_on_tire:,}m to 15k SOP"
+            sop_badge = f"🟢 {t_target - miles_on_tire:,}m to {t_target // 1000}k SOP"
             sop_color = "#A6E3A1"
 
         # 2. Physical Tread Depth Status

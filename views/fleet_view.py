@@ -32,9 +32,10 @@ from utils.rental_lifecycle import (
     evaluate_rental_compliance, ExtendRentalDialog, check_and_auto_retire_rentals
 )
 from utils.service_tracker import evaluate_vehicle_health
+from utils.provider_sop import get_sop_for_provider
 
 # --- CLOUD SYNC & FOLDER CONSTANTS ---
-from cloud_sync import upload_file_to_drive_sync, sync_unit_to_fpd_sheet
+from cloud_sync import upload_file_to_drive_sync, sync_unit_to_fpd_sheet, push_unsynced_vehicles_to_cloud
 from config import SUBFOLDER_PAVE, SUBFOLDER_QR_CODES, FPD_SHEET_NAME
 
 
@@ -528,6 +529,9 @@ class AddUnitDialog(QDialog):
             master_qr_filename = "Master_Fleet_QR_Labels.pdf"
             export_grid_to_pdf(qr_roster, master_qr_filename, parent_widget=None)
 
+        prov_sop = self.db.get_provider_sop(prov)
+        oil_interval = int(prov_sop.get('oil_pm_interval', 7500))
+
         # --- 6. PAYLOAD CONSTRUCTION ---
         unit_payload = {
             'vehicle_id': vehicle_id,
@@ -548,7 +552,7 @@ class AddUnitDialog(QDialog):
             'pave_insp': pave_cloud_link,
             'status': 'Active',
             'mileage': self.spin_intake_mileage.value(),
-            'service_interval': 7500
+            'service_interval': oil_interval
         }
 
         # --- 7. SAVE TO LOCAL SQLITE CACHE & SYNC TO CLOUD SHEET ---
@@ -556,6 +560,13 @@ class AddUnitDialog(QDialog):
         self.db.save_vehicles_bulk(new_unit_df)
 
         sheet_ok, sheet_url, sheet_err = sync_unit_to_fpd_sheet(unit_payload)
+        # If offline or cloud sync failed, queue mutation for background auto-push
+        if not sheet_ok:
+            self.db.enqueue_mutation(
+                action_type="ADD_UNIT",
+                target_id=vehicle_id,
+                payload=unit_payload
+            )
 
         # --- 8. SUMMARY NOTIFICATION & DIALOG ACCEPT ---
         status_lines = [
@@ -671,6 +682,27 @@ class FleetView(QWidget):
         header_layout.addWidget(lbl_title)
 
         header_layout.addStretch()
+
+        # Dynamic Provider SOP Configurator Button
+        btn_sop = QPushButton("⚙️ Provider SOPs")
+        btn_sop.setFixedHeight(35)
+        btn_sop.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_sop.setStyleSheet("""
+            QPushButton {
+                background-color: #313244; 
+                color: #F9E2AF; 
+                border: 1px solid #45475A;
+                font-weight: bold; 
+                border-radius: 6px; 
+                padding: 0 14px;
+            }
+            QPushButton:hover {
+                background-color: #45475A;
+                color: #F5E0DC;
+            }
+        """)
+        btn_sop.clicked.connect(self.open_sop_config_dialog)
+        header_layout.addWidget(btn_sop)
 
         # Unified QR Generator Button
         self.btn_qr = QPushButton("🖨️ QR Generator")
@@ -840,6 +872,8 @@ class FleetView(QWidget):
         self.btn_refresh.setEnabled(False)
         self.btn_refresh.setText("⏳ Syncing...")
 
+        # Safeguard: Push offline local records upstream before overwriting SQLite cache
+        push_unsynced_vehicles_to_cloud(self.db)
         success, cloud_df, err = pull_fpd_master_sheet()
 
         self.btn_refresh.setEnabled(True)
@@ -868,6 +902,13 @@ class FleetView(QWidget):
         """Opens the unified QR Generator modal."""
         dialog = QRGeneratorDialog(self.db, parent=self)
         dialog.exec()
+
+    def open_sop_config_dialog(self) -> None:
+        """Opens modal dialog to customize vendor maintenance and reimbursement rules."""
+        from utils.provider_sop import ProviderSOPEditDialog
+        dialog = ProviderSOPEditDialog(self.db, parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.refresh_data()
 
     def open_add_unit_dialog(self) -> None:
         """Opens modal dialog for adding a new unit."""
@@ -1014,13 +1055,11 @@ class FleetView(QWidget):
             matches = self.vehicles_df[self.vehicles_df['vehicle_id'] == vid]
             if not matches.empty:
                 v_data = matches.iloc[0].to_dict()
-                ret_val = str(v_data.get('return_date', '')).strip()
-                unit_type = str(v_data.get('unit_type', ''))
-                if ret_val or unit_type == 'Temp':
-                    dialog = ExtendRentalDialog(self.db, v_data, is_retired=False, parent=self)
-                    if dialog.exec() == QDialog.DialogCode.Accepted:
-                        self.refresh_data()
-                        self.data_mutated.emit()
+                # Single-click opens the Unified Compliance Manager for any vehicle
+                dialog = ExtendRentalDialog(self.db, v_data, is_retired=False, parent=self)
+                if dialog.exec() == QDialog.DialogCode.Accepted:
+                    self.refresh_data()
+                    self.data_mutated.emit()
 
     def handle_cell_double_click(self, row: int, col: int) -> None:
         """Routes double-clicks: edits mileage if in col 6, else opens profile."""

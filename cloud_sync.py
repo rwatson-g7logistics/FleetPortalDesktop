@@ -15,10 +15,16 @@ from packaging import version
 from pathlib import Path
 from typing import Optional, Tuple, Any, Dict
 
+# PySide6 is required for GUI dialogs and background threading
 from PySide6.QtCore import QThread, Signal
+
+# google-auth and google-api-python-client are required for Google Drive and Sheets integration
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 from google_auth_oauthlib.flow import InstalledAppFlow
+
+# googleapiclient is required for Google Drive file and folder management
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
@@ -33,32 +39,61 @@ _FOLDER_CACHE: Dict[Tuple[str, str], str] = {}
 
 
 def get_gcp_credentials(interactive: bool = False) -> Optional[Any]:
-    """Authenticates and returns Google OAuth credentials."""
+    """Authenticates and returns Google OAuth credentials, purging stale tokens on RefreshError."""
     creds = None
     if os.path.exists(TOKEN_PATH):
         try:
             creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
-        except Exception:
+        except Exception as e:
+            print(f"[AUTH WARNING] Could not parse token.json: {e}")
             creds = None
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             try:
+                print("[AUTH] Attempting silent token refresh with Google...")
                 creds.refresh(Request())
                 with open(TOKEN_PATH, 'w') as token_file:
                     token_file.write(creds.to_json())
+                print("[AUTH SUCCESS] Token refreshed silently and written to disk.")
                 return creds
-            except Exception:
+            except RefreshError as re:
+                print(f"[AUTH REVOKED] Refresh token expired or revoked ({re}). Purging stale token.json.")
+                try:
+                    if os.path.exists(TOKEN_PATH):
+                        os.remove(TOKEN_PATH)
+                except OSError:
+                    pass
+                creds = None
+            except Exception as e:
+                print(f"[AUTH WARNING] Token refresh error: {e}")
                 creds = None
 
         if not creds and interactive:
             if not os.path.exists(CREDENTIALS_PATH):
+                print(f"[AUTH ERROR] credentials.json not found at {CREDENTIALS_PATH}")
                 return None
 
-            flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_PATH), SCOPES)
-            creds = flow.run_local_server(port=0)
-            with open(TOKEN_PATH, 'w') as token_file:
-                token_file.write(creds.to_json())
+            try:
+                print("[AUTH] Spawning browser OAuth flow (prompt=consent)...")
+                flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_PATH), SCOPES)
+                creds = flow.run_local_server(
+                    port=0,
+                    prompt='consent',
+                    authorization_prompt_message="Opening browser for Google authentication...",
+                    success_message="Google authentication successful! You may close this window and return to FleetPortal."
+                )
+                with open(TOKEN_PATH, 'w') as token_file:
+                    token_file.write(creds.to_json())
+
+                if os.path.exists(TOKEN_PATH) and os.path.getsize(TOKEN_PATH) > 0:
+                    print(f"[AUTH SUCCESS] Fresh token.json verified on disk ({os.path.getsize(TOKEN_PATH)} bytes).")
+                else:
+                    print("[AUTH ERROR] token.json was not created.")
+                    return None
+            except Exception as e:
+                print(f"[AUTH ERROR] Interactive login failed: {e}")
+                return None
 
     return creds
 
@@ -378,27 +413,44 @@ def update_cloud_vehicle_mileage(vehicle_id: str, new_mileage: int) -> Tuple[boo
     """
     Directly updates Column M (Mileage, Column 13) in FPD_Master_Sheet.
     Prevents cache refreshes from rolling back local odometer changes.
+    Self-heals if unit was added while offline.
     """
     creds = get_gcp_credentials(interactive=False)
     client = get_gspread_client()
     if not creds or not client:
-        return False, "Authentication missing."
+        return False, "Authentication missing. Please connect your Google account in the sidebar."
 
     try:
         service = build('drive', 'v3', credentials=creds)
         worksheet, _ = get_or_create_fpd_sheet(service, client)
 
-        clean_uid = vehicle_id.split('_')[-1].lstrip('0') or vehicle_id.split('_')[-1]
-        
-        # Locate row by display Unit ID or compound Vehicle ID
-        cell = worksheet.find(clean_uid)
-        if not cell:
-            cell = worksheet.find(vehicle_id)
-        if not cell:
+        prov_hint, raw_uid = parse_vehicle_id(vehicle_id)
+        all_rows = worksheet.get_all_values()
+        target_row_idx = None
+
+        for idx, row in enumerate(all_rows[1:], start=2):
+            if len(row) >= 2:
+                row_uid = str(row[0]).strip()
+                row_prov = str(row[1]).strip()
+                if (row_uid == raw_uid and (not prov_hint or row_prov.lower() == prov_hint.lower())) or row_uid == vehicle_id:
+                    target_row_idx = idx
+                    break
+
+        # Self-healing: if unit is missing in cloud sheet, insert from local cache
+        if not target_row_idx:
+            db = DatabaseManager()
+            df = db.get_all_vehicles()
+            match = df[(df['vehicle_id'] == vehicle_id) | (df['vehicle_id'].str.endswith(f"_{raw_uid}"))]
+            if not match.empty:
+                v_data = match.iloc[0].to_dict()
+                v_data['mileage'] = int(new_mileage)
+                ok, _, err = sync_unit_to_fpd_sheet(v_data)
+                if ok:
+                    return True, ""
+                return False, f"Unit '{vehicle_id}' missing in sheet and auto-sync failed: {err}"
             return False, f"Unit '{vehicle_id}' not found in FPD_Master_Sheet."
 
-        # Update Column 13 (Column M: Mileage)
-        worksheet.update_cell(cell.row, 13, int(new_mileage))
+        worksheet.update_cell(target_row_idx, 13, int(new_mileage))
         return True, ""
     except Exception as e:
         return False, str(e)
@@ -423,6 +475,68 @@ def update_cloud_return_date(vehicle_id: str, new_return_date: str) -> Tuple[boo
 
         # Return_Date is Column 19 (Column S)
         worksheet.update_cell(cell.row, 19, new_return_date)
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+def update_cloud_compliance_docs(
+    vehicle_id: str, 
+    registration: Optional[str] = None, 
+    insurance: Optional[str] = None, 
+    return_date: Optional[str] = None
+) -> Tuple[bool, str]:
+    """
+    Directly updates Registration (Col 15), Insurance (Col 16), and/or Return Date (Col 19)
+    in FPD_Master_Sheet. If the unit is missing from the sheet (e.g. added during an expired auth session),
+    it automatically self-heals by inserting the complete vehicle record from local SQLite.
+    """
+    creds = get_gcp_credentials(interactive=False)
+    client = get_gspread_client()
+    if not creds or not client:
+        return False, "Authentication missing. Please connect your Google account in the sidebar."
+
+    try:
+        service = build('drive', 'v3', credentials=creds)
+        worksheet, _ = get_or_create_fpd_sheet(service, client)
+
+        prov_hint, raw_uid = parse_vehicle_id(vehicle_id)
+        all_rows = worksheet.get_all_values()
+        target_row_idx = None
+
+        for idx, row in enumerate(all_rows[1:], start=2):
+            if len(row) >= 2:
+                row_uid = str(row[0]).strip()
+                row_prov = str(row[1]).strip()
+                if (row_uid == raw_uid and (not prov_hint or row_prov.lower() == prov_hint.lower())) or row_uid == vehicle_id:
+                    target_row_idx = idx
+                    break
+
+        # Self-healing: if unit was never written to Google Sheets, insert from local SQLite
+        if not target_row_idx:
+            db = DatabaseManager()
+            df = db.get_all_vehicles()
+            match = df[(df['vehicle_id'] == vehicle_id) | (df['vehicle_id'].str.endswith(f"_{raw_uid}"))]
+            if not match.empty:
+                v_data = match.iloc[0].to_dict()
+                if registration is not None:
+                    v_data['registration'] = registration
+                if insurance is not None:
+                    v_data['insurance'] = insurance
+                if return_date is not None:
+                    v_data['return_date'] = return_date
+                ok, _, err = sync_unit_to_fpd_sheet(v_data)
+                if ok:
+                    return True, ""
+                return False, f"Unit '{vehicle_id}' missing in sheet and auto-sync failed: {err}"
+            return False, f"Unit '{vehicle_id}' not found in FPD_Master_Sheet or local cache."
+
+        if registration is not None:
+            worksheet.update_cell(target_row_idx, 15, str(registration))
+        if insurance is not None:
+            worksheet.update_cell(target_row_idx, 16, str(insurance))
+        if return_date is not None:
+            worksheet.update_cell(target_row_idx, 19, str(return_date))
+
         return True, ""
     except Exception as e:
         return False, str(e)
@@ -525,6 +639,58 @@ def get_or_create_fpd_sheet(service: Any, client: gspread.Client) -> Tuple[gspre
     _FOLDER_CACHE[cache_key] = sheet_id
     return worksheet, web_link
 
+def push_unsynced_vehicles_to_cloud(db_manager) -> Tuple[int, str]:
+    """
+    Scans local SQLite master_vehicles against FPD_Master_Sheet.
+    Automatically appends any units that exist locally but are missing in the cloud sheet.
+    """
+    creds = get_gcp_credentials(interactive=False)
+    client = get_gspread_client()
+    if not creds or not client:
+        return 0, "Authentication missing. Connect Google account in sidebar."
+
+    try:
+        service = build('drive', 'v3', credentials=creds)
+        worksheet, _ = get_or_create_fpd_sheet(service, client)
+
+        all_rows = worksheet.get_all_values()
+        cloud_ids = set()
+        for row in all_rows[1:]:
+            if len(row) >= 2:
+                u_id = str(row[0]).strip().lower()
+                prov = str(row[1]).strip().lower().replace(' ', '_').replace('-', '_')
+                cloud_ids.add(u_id)
+                cloud_ids.add(f"{prov}_{u_id}")
+            elif len(row) >= 1:
+                cloud_ids.add(str(row[0]).strip().lower())
+
+        local_df = db_manager.get_all_vehicles()
+        if local_df.empty:
+            return 0, ""
+
+        pushed_count = 0
+        for _, row in local_df.iterrows():
+            v_id = str(row.get('vehicle_id', '')).strip()
+            raw_uid = str(row.get('unit_id') or v_id.split('_')[-1]).strip()
+            prov = str(row.get('provider', '')).strip()
+            clean_prov_tag = prov.lower().replace(' ', '_').replace('-', '_')
+            combined_key = f"{clean_prov_tag}_{raw_uid}".lower()
+
+            # If unit does not exist in FPD_Master_Sheet, upload it
+            if raw_uid.lower() not in cloud_ids and v_id.lower() not in cloud_ids and combined_key not in cloud_ids:
+                unit_data = row.to_dict()
+                unit_data['unit_id'] = raw_uid
+                ok, _, err = sync_unit_to_fpd_sheet(unit_data)
+                if ok:
+                    pushed_count += 1
+                    cloud_ids.add(raw_uid.lower())
+                    cloud_ids.add(combined_key)
+                else:
+                    print(f"[AUTO-PUSH ERROR] Failed to push {v_id}: {err}")
+
+        return pushed_count, ""
+    except Exception as e:
+        return 0, str(e)
 
 def sync_unit_to_fpd_sheet(unit_data: Dict[str, Any]) -> Tuple[bool, str, str]:
     """
@@ -643,20 +809,91 @@ def upload_file_to_drive_sync(
     except Exception as err:
         return False, "", str(err)
 
+def upload_unit_file_to_drive_sync(
+    local_filepath: str, 
+    drive_filename: str, 
+    vehicle_id: str,
+    sub_category: Optional[str] = "Compliance"
+) -> Tuple[bool, str, str]:
+    """
+    Uploads a document directly into an isolated unit-specific category subfolder:
+    FPD_ROOT / Unit Records / <vehicle_id> / <sub_category> / <drive_filename>
+    Example sub_categories: 'Compliance', 'Invoices', 'PAVE'
+    """
+    if not os.path.exists(local_filepath):
+        return False, "", f"Local file not found: {local_filepath}"
+
+    creds = get_gcp_credentials(interactive=False)
+    if not creds:
+        return False, "", "Authentication missing. Please connect your Google account in the sidebar."
+
+    try:
+        service = build('drive', 'v3', credentials=creds)
+
+        # 1. Master "Unit Records" directory
+        units_root_id = ensure_subfolder(service, "Unit Records", FPD_ROOT_FOLDER_ID)
+
+        # 2. Individual vehicle folder (e.g., "amzn_DV1")
+        unit_folder_id = ensure_subfolder(service, vehicle_id, units_root_id)
+
+        # 3. Categorized folder inside unit folder (e.g. "Compliance" or "Invoices")
+        if sub_category:
+            target_parent_id = ensure_subfolder(service, sub_category, unit_folder_id)
+        else:
+            target_parent_id = unit_folder_id
+
+        ext = Path(local_filepath).suffix.lower()
+        mime = 'application/pdf' if ext == '.pdf' else 'application/octet-stream'
+        media = MediaFileUpload(local_filepath, mimetype=mime, resumable=True)
+
+        query_file = (
+            f"name = '{drive_filename}' and "
+            f"'{target_parent_id}' in parents and "
+            f"trashed = false"
+        )
+        res_file = service.files().list(q=query_file, spaces='drive', fields='files(id, webViewLink)').execute()
+        existing_files = res_file.get('files', [])
+
+        if existing_files:
+            file_id = existing_files[0]['id']
+            file = service.files().update(
+                fileId=file_id,
+                media_body=media,
+                fields='id, webViewLink'
+            ).execute()
+        else:
+            file_metadata = {
+                'name': drive_filename,
+                'parents': [target_parent_id]
+            }
+            file = service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields='id, webViewLink'
+            ).execute()
+
+        return True, file.get('webViewLink', ''), ""
+
+    except Exception as err:
+        return False, "", str(err)
+
 
 class AuthWorker(QThread):
     auth_finished = Signal(bool, str)
 
     def run(self) -> None:
         if not os.path.exists(CREDENTIALS_PATH):
-            self.auth_finished.emit(False, "Missing credentials.json at project root.")
+            self.auth_finished.emit(False, f"Missing credentials.json at project root ({CREDENTIALS_PATH.name}).")
             return
         try:
             creds = get_gcp_credentials(interactive=True)
             if creds and creds.valid:
-                self.auth_finished.emit(True, "Successfully authenticated with Google Cloud!")
+                if os.path.exists(TOKEN_PATH) and os.path.getsize(TOKEN_PATH) > 0:
+                    self.auth_finished.emit(True, f"Successfully authenticated! Fresh token.json written ({os.path.getsize(TOKEN_PATH)} bytes).")
+                else:
+                    self.auth_finished.emit(False, "OAuth completed, but token.json file could not be written to disk.")
             else:
-                self.auth_finished.emit(False, "Authentication was cancelled or failed.")
+                self.auth_finished.emit(False, "Authentication was cancelled, revoked, or failed to validate.")
         except Exception as err:
             self.auth_finished.emit(False, f"Sign-in error: {str(err)}")
 
@@ -727,7 +964,12 @@ class SyncWorker(QThread):
         self.db = db_manager
 
     def run(self) -> None:
-        self.sync_finished.emit(True, "Local Cache Active")
+        # Actively test session validity and attempt silent token refresh on startup
+        creds = get_gcp_credentials(interactive=False)
+        if creds and creds.valid:
+            self.sync_finished.emit(True, "Cloud Sync: Up to Date")
+        else:
+            self.sync_finished.emit(False, "Session Expired (Click to Connect)")
 
 
 class PushWorker(QThread):
@@ -738,12 +980,37 @@ class PushWorker(QThread):
         self.db = db_manager
 
     def run(self) -> None:
-        pending = self.db.get_pending_mutations()
-        if not pending:
-            self.push_finished.emit(True, "Queue is empty.")
+        """Executes upstream cloud reconciliation and processes pending mutations."""
+        creds = get_gcp_credentials(interactive=False)
+        if not creds or not creds.valid:
+            self.push_finished.emit(False, "Google Cloud disconnected. Changes queued locally.")
             return
 
-        self.push_finished.emit(
-            True, 
-            f"FPD Isolated: {len(pending)} mutations stored safely in local SQLite. Upstream master writes blocked."
-        )
+        try:
+            # 1. Push any offline-created vehicles missing from FPD_Master_Sheet
+            pushed_count, err = push_unsynced_vehicles_to_cloud(self.db)
+            if err:
+                self.push_finished.emit(False, f"Push warning: {err}")
+                return
+
+            # 2. Process pending mutations from sync_queue
+            mutations = self.db.get_pending_mutations()
+            for m in mutations:
+                m_id = m['id']
+                a_type = m['action_type']
+                payload = json.loads(m['payload_json'])
+
+                if a_type == "UPDATE_MILEAGE":
+                    update_cloud_vehicle_mileage(payload.get('vehicle_id', ''), payload.get('mileage', 0))
+                elif a_type == "ADD_UNIT":
+                    sync_unit_to_fpd_sheet(payload)
+
+                self.db.mark_mutation_synced(m_id)
+
+            status_msg = "Cloud Sync: Up to Date"
+            if pushed_count > 0:
+                status_msg = f"Auto-synced {pushed_count} offline unit(s) to Google Sheets."
+            self.push_finished.emit(True, status_msg)
+
+        except Exception as err:
+            self.push_finished.emit(False, f"Sync error: {str(err)}")

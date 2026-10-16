@@ -23,6 +23,7 @@ from db_manager import DatabaseManager
 from utils.platform_helper import get_default_font_family, get_app_data_directory
 from utils.date_picker import DatePickerEdit
 from utils.pave import generate_pave_pdf
+from utils.provider_sop import get_sop_for_provider
 from utils.qr_helper import export_grid_to_pdf, clean_vin
 from utils.rental_lifecycle import evaluate_rental_compliance
 from cloud_sync import upload_file_to_drive_sync, retire_unit_cloud
@@ -452,8 +453,8 @@ class VehicleProfileView(QWidget):
         mileage = int(raw_mil) if raw_mil.isdigit() else 0
         raw_last_a = str(self.vehicle_data.get('last_a_service', 0)).replace(',', '').split('.')[0]
         last_a = int(raw_last_a) if raw_last_a.isdigit() else 0
-        raw_int = str(self.vehicle_data.get('service_interval', 7500)).split('.')[0]
-        interval = int(raw_int) if raw_int.isdigit() else 7500
+        prov_sop = get_sop_for_provider(prov, self.db)
+        interval = int(prov_sop.get('oil_pm_interval', 7500))
 
         diff = mileage - last_a
         if diff >= interval:

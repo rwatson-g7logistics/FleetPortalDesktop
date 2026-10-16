@@ -214,7 +214,37 @@ class DatabaseManager:
                    OR (make = 'Rivian' AND model IN ('EDV 500', 'EDV 700'))
             """)
 
-            # Streamlined Delivery Fleet Defaults
+            # --- 4. PROVIDER SOP THRESHOLDS TABLE ---
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS lookup_provider_sops (
+                    provider_name TEXT PRIMARY KEY,
+                    oil_pm_interval INTEGER DEFAULT 7500,
+                    tire_reimburse_miles INTEGER DEFAULT 15000,
+                    tire_warning_window INTEGER DEFAULT 1000,
+                    brake_check_interval INTEGER DEFAULT 18000,
+                    alignment_interval INTEGER DEFAULT 15000,
+                    notes TEXT DEFAULT ''
+                )
+            """)
+
+            # Default Vendor SOP Matrix
+            default_sops = [
+                ("Merchants", 5000, 15000, 1000, 18000, 15000, "Quarterly PM cycle; strict 15k tire coverage"),
+                ("Kingbee", 7000, 15000, 1000, 20000, 15000, "7k PM window; 15k tire claim authorization required"),
+                ("AMZN", 5000, 15000, 1000, 15000, 15000, "Strict safety audits; A-PM every 5k"),
+                ("U-Haul", 7500, 15000, 1000, 18000, 15000, "Rental maintenance terms"),
+                ("Budget", 7500, 15000, 1000, 18000, 15000, "Rental maintenance terms"),
+                ("Enterprise", 7500, 15000, 1000, 18000, 15000, "Rental maintenance terms"),
+                ("Other", 7500, 15000, 1000, 18000, 15000, "Standard fleet defaults")
+            ]
+            cursor.executemany("""
+                INSERT OR IGNORE INTO lookup_provider_sops (
+                    provider_name, oil_pm_interval, tire_reimburse_miles, 
+                    tire_warning_window, brake_check_interval, alignment_interval, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, default_sops)
+
+            # 5. Streamlined Delivery Fleet Defaults
             default_vehicles = [
                 ("Ford", "Transit 150"),
                 ("Ford", "Transit 250"),
@@ -288,6 +318,83 @@ class DatabaseManager:
             return cursor.rowcount > 0
 
     # --- VEHICLE QUERIES & CACHING ---
+
+    def get_provider_sop(self, provider_name: str) -> Dict[str, Any]:
+        """Fetches dynamic SOP thresholds for a specific vendor with fallback defaults."""
+        clean_prov = provider_name.strip()
+
+        # Normalize common fleet provider aliases
+        alias_map = {
+            'amazon': 'AMZN',
+            'amzn': 'AMZN',
+            'merchants': 'Merchants',
+            'merchant': 'Merchants',
+            'kingbee': 'Kingbee',
+            'u-haul': 'U-Haul',
+            'uhaul': 'U-Haul',
+            'u_haul': 'U-Haul',
+            'budget': 'Budget',
+            'enterprise': 'Enterprise',
+            'hertz': 'Hertz',
+            'lmr': 'LMR'
+        }
+        canonical_prov = alias_map.get(clean_prov.lower(), clean_prov)
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM lookup_provider_sops WHERE LOWER(provider_name) = LOWER(?)",
+                (canonical_prov,)
+            )
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+
+            # Fallback to general default if unlisted
+            cursor.execute("SELECT * FROM lookup_provider_sops WHERE provider_name = 'Other'")
+            fallback = cursor.fetchone()
+            if fallback:
+                return dict(fallback)
+
+            return {
+                "provider_name": canonical_prov,
+                "oil_pm_interval": 7500,
+                "tire_reimburse_miles": 15000,
+                "tire_warning_window": 1000,
+                "brake_check_interval": 18000,
+                "alignment_interval": 15000,
+                "notes": "System Default"
+            }
+
+    def save_provider_sop(self, sop_data: Dict[str, Any]) -> bool:
+        """Inserts or updates a vendor's SOP compliance thresholds."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO lookup_provider_sops (
+                    provider_name, oil_pm_interval, tire_reimburse_miles,
+                    tire_warning_window, brake_check_interval, alignment_interval, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                sop_data.get('provider_name', 'Other').strip(),
+                int(sop_data.get('oil_pm_interval', 7500)),
+                int(sop_data.get('tire_reimburse_miles', 15000)),
+                int(sop_data.get('tire_warning_window', 1000)),
+                int(sop_data.get('brake_check_interval', 18000)),
+                int(sop_data.get('alignment_interval', 15000)),
+                str(sop_data.get('notes', '')).strip()
+            ))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def get_all_provider_sops(self) -> List[Dict[str, Any]]:
+        """Retrieves all registered vendor SOP profiles."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM lookup_provider_sops ORDER BY provider_name ASC")
+            return [dict(r) for r in cursor.fetchall()]
 
     def save_vehicles_bulk(self, vehicles_df: pd.DataFrame) -> None:
         """Saves or updates a batch of vehicle records from Google Sheets into SQLite."""

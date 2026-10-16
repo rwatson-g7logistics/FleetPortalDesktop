@@ -1,4 +1,4 @@
-# FleetPortalDesktop (FPD) — G7 Fleet Command Center
+# FleetPortalDesktop (FPD) — Fleet Overview
 
 Native cross-platform desktop management workstation built with Python and PySide6 (Qt). Designed to manage fleet asset health, scheduled PM services, parts inventory, compliance tracking, and documentation across multi-user environments with local SQLite caching and asynchronous Google Workspace synchronization.
 

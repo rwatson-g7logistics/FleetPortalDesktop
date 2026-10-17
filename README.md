@@ -129,17 +129,3 @@ python -c "from db_manager import DatabaseManager; db = DatabaseManager(); print
 python -c "from db_manager import DatabaseManager; db = DatabaseManager(); conn = db.get_connection(); conn.cursor().execute(\"DELETE FROM lookup_make_models WHERE make = 'TestMake' AND model = 'TestModel'\"); conn.commit(); print('Cleaned lookup_make_models.')"
 
 ---
-
-## Project Status & Development Roadmap
-
-### Active Modules (Phase 1 — Locked In)
-* **Fleet Command Center (`views/fleet_view.py`):** Multi-variable search, dynamic status filtering, intake validation (17-char VIN, duplicate safeguards, leading-zero lockout), inline odometer editing with immediate cloud write-through, and compliance decay warnings.
-* **Cloud & Persistence Engine (`cloud_sync.py`, `db_manager.py`):** Bidirectional sync between SQLite cache and Google Sheets (`FPD_Master_Sheet` and `FPD_Retired_Sheet`), in-place Google Drive file updating, and PAVE document routing.
-* **Label & QR Automation (`utils/qr_helper.py`):** Consolidated 24-up label generator (1.4" × 1.4" badges, 4 columns) outputting to `Master_Fleet_QR_Labels.pdf` and synced to Drive.
-
-### Target Milestone (Year-End Target / Pre-Peak Stability)
-- [ ] **Modular Deep Dive Hub (`views/vehicle_profile.py`):** Decouple layout into `utils/profile_card_builder.py`, direct PAVE / invoice PDF launch, and single-unit lifetime maintenance ledger export.
-- [ ] **Service Reporting Engine (`views/service_view.py`):** Standardize balanced 6-item service selector, diagnostic logging, tire position tracking, and auto-inventory deduction.
-- [ ] **Access & Security:** Role-based retirement signature auditing and idle session auto-lock.
-
----

@@ -101,6 +101,8 @@ class DatabaseManager:
             existing_cols = [c[1] for c in cursor.fetchall()]
 
             inspection_fields = {
+                'location': "TEXT DEFAULT 'On Yard'",
+                'payment_route': "TEXT DEFAULT 'Provider'",
                 'tread_df': 'INTEGER DEFAULT 0',
                 'tread_pf': 'INTEGER DEFAULT 0',
                 'tread_dr': 'INTEGER DEFAULT 0',
@@ -592,12 +594,12 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO service_logs (
-                    vehicle_id, vin, date, service_type, mileage, vendor,
+                    vehicle_id, vin, date, service_type, mileage, vendor, location,
                     invoice_num, cost, notes, payment_route, tire_count, tire_positions,
                     tread_df, tread_pf, tread_dr, tread_pr,
                     brake_front_mm, brake_front_pct, brake_rear_mm, brake_rear_pct,
                     rotor_condition
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 data.get('vehicle_id', ''),
                 data.get('vin', ''),
@@ -605,6 +607,7 @@ class DatabaseManager:
                 data.get('service_type', ''),
                 int(data.get('mileage', 0)),
                 data.get('vendor', ''),
+                data.get('location', 'On Yard'),
                 data.get('invoice_num', ''),
                 float(data.get('cost', 0.0)),
                 data.get('notes', ''),

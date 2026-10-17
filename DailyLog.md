@@ -6,10 +6,33 @@
 - [ ] Decouple `views/vehicle_profile.py` layout into `utils/profile_card_builder.py`.
 - [ ] StepDeck / Box Truck DOT Inspection Framework: Plan the annual/periodic DOT inspection compliance badge and datestamp tracking for commercial trucks.
 - [ ] Streamline `views/service_view.py` to route invoice attachments into `Unit Records / <vehicle_id> / Invoices`.
+- [ ] **Service Report PDF Compiler (`utils/pdf_builder.py`, `views/service_view.py`):**
+  - Inject `tire_count` and `tire_positions` directly into the generated PDF report layout.
+  - Merge pre-existing attached invoice PDFs directly into the generated service report to create a single unified document instead of loose attachments.
+- [ ] **Real-Time Telemetry Card Synchronization (`views/unit_service_view.py`):**
+  - Trace and fix the card state persistence bug where Yard Inspections and Service Logs fail to update the 4-corner Tire Wear and Subsystem milestone cards.
+- [ ] **Road-Call Location Validation (`views/unit_service_view.py`):**
+  - Conditionally display `self.txt_loc_detail` only when "🚨 On Route (Road Call)" is selected, and make it a mandatory field before allowing inspection commits.
+- [ ] User session timeout and role-based signature verification.
+
+## End of Day (EOD) Build Summary — October 17, 2026
+
+### Completed Milestones — October 17
+
+* **Two-Clock Tire Telemetry Model (`utils/service_tracker.py`):**
+  * Separated the 15,000-mile Provider SOP Reimbursement Clock (which only resets on provider-paid replacements) from the physical hub rubber clock (which resets miles and tread depth on all replacements, including out-of-pocket).
+* **Consolidated Maintenance Ledger (`views/maintenance_table.py`):**
+  * Built unified `MaintenanceHistoryWidget` shared across Unit Profile and Service Status with standardized 7-column layout: Date, Service Performed, Mileage, Vendor, Location, Invoice #, and Cost Type.
+  * Hidden numeric dollar costs from the display table while preserving them in the database for cost-center accounting.
+  * Connected double-click row triggers to launch cached PDF work orders and inspection slips in the default viewer.
+* **Nested Cloud Drive Storage Structure (`cloud_sync.py`, `views/service_view.py`):**
+  * Updated recursive folder creation in `upload_unit_file_to_drive_sync()` to create isolated sub-paths: `Unit Records / <vehicle_id> / Service / InHouse` and `Unit Records / <vehicle_id> / Service / ShopRepairs`.
+* **Database Schema Migration (`db_manager.py`):**
+  * Migrated `service_logs` table with an automatic column addition for `location` to store yard bay details or road-call addresses.
 
 ## End of Day (EOD) Build Summary — October 16, 2026
 
-### Completed Milestones
+### Completed Milestones  — October 16
 
 * **Dynamic Provider SOP Engine (`utils/provider_sop.py`, `db_manager.py`):**
   * Decoupled hardcoded maintenance intervals into a customizable SQLite lookup table (`lookup_provider_sops`).

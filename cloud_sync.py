@@ -845,11 +845,14 @@ def upload_unit_file_to_drive_sync(
         # 2. Individual vehicle folder (e.g., "amzn_DV1")
         unit_folder_id = ensure_subfolder(service, vehicle_id, units_root_id)
 
-        # 3. Categorized folder inside unit folder (e.g. "Compliance" or "Invoices")
+        # 3. Recursive directory nesting (Unit Records -> <vehicle_id> -> Service -> InHouse / ShopRepairs)
+        target_parent_id = unit_folder_id
         if sub_category:
-            target_parent_id = ensure_subfolder(service, sub_category, unit_folder_id)
-        else:
-            target_parent_id = unit_folder_id
+            clean_sub = sub_category.strip("/").replace("\\", "/")
+            for folder_part in clean_sub.split("/"):
+                folder_name = folder_part.strip()
+                if folder_name:
+                    target_parent_id = ensure_subfolder(service, folder_name, target_parent_id)
 
         ext = Path(local_filepath).suffix.lower()
         mime = 'application/pdf' if ext == '.pdf' else 'application/octet-stream'

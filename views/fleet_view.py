@@ -25,7 +25,8 @@ from PySide6.QtGui import QFont, QColor
 # --- UTILITY MODULE IMPORTS ---
 from db_manager import DatabaseManager
 from utils.platform_helper import get_default_font_family, get_app_data_directory
-from utils.qr_helper import export_grid_to_pdf, clean_vin, QRGeneratorDialog
+from utils.qr_helper import export_grid_to_pdf, QRGeneratorDialog
+from utils.vin_validator import validate_vin, clean_vin
 from utils.pave import generate_pave_pdf
 from utils.date_picker import DatePickerEdit
 from utils.rental_lifecycle import (
@@ -218,7 +219,7 @@ class AddUnitDialog(QDialog):
 
         self.txt_vin = QLineEdit()
         self.txt_vin.setMaxLength(17)
-        self.txt_vin.setPlaceholderText("17-Character VIN")
+        self.txt_vin.setPlaceholderText("17-Character VIN (No I, O, Q)")
         self.txt_vin.textChanged.connect(lambda t: self.txt_vin.setText(t.upper()) if t != t.upper() else None)
 
         self.txt_plate = QLineEdit()
@@ -433,20 +434,11 @@ class AddUnitDialog(QDialog):
         clean_prov_tag = prov.lower().replace(' ', '_').replace('-', '_')
         vehicle_id = f"{clean_prov_tag}_{clean_unit_id}"
 
-        # --- 2. VIN VALIDATION (EXACT 17 CHARACTERS) ---
-        if len(vin) != 17:
-            QMessageBox.warning(
-                self,
-                "Invalid VIN",
-                f"VIN must be exactly 17 characters.\n\nCurrent length: {len(vin)} characters\nEntered: '{vin}'"
-            )
-            return
-        if vin.startswith('00'):
-            QMessageBox.warning(
-                self,
-                "Invalid VIN",
-                f"VIN cannot begin with '00'. Please enter a valid 17-character VIN.\n\nEntered: '{vin}'"
-            )
+        # --- 2. DECOUPLED VIN VALIDATION ---
+        selected_make = self.cmb_make.currentText().strip()
+        is_valid_vin, vin, vin_error = validate_vin(self.txt_vin.text(), make=selected_make)
+        if not is_valid_vin:
+            QMessageBox.warning(self, "VIN Validation", vin_error)
             return
 
         # --- 3. DUPLICATE VALIDATION SAFEGUARDS (UNIT ID, VIN, PLATE) ---

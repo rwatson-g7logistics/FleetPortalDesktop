@@ -77,24 +77,43 @@ def evaluate_vehicle_health(vehicle_data: Dict[Any, Any], db_manager) -> Dict[st
     else:
         oil_line = f"• Oil PM: 🟢 {oil_remaining:,}m remaining"
 
-    # 2. Tires (Vendor-Specific Dynamic Reimbursement Window)
-    last_tire_mileage = 0
+    # 2. Tires: Dual-Clock Tracking (Provider Pay Reimbursement vs. Physical Safety)
+    # A. Provider SOP Reimbursement Clock: Only resets when Provider paid!
+    last_provider_tire_mileage = 0
     for l in logs:
-        if 'tire' in str(l.get('service_type', '')).lower():
-            last_tire_mileage = int(l.get('mileage', 0))
+        st = str(l.get('service_type', '')).lower()
+        pr = str(l.get('payment_route', '')).lower()
+        if 'tire' in st and pr == 'provider':
+            last_provider_tire_mileage = int(l.get('mileage', 0))
             break
 
-    tire_delta = current_mileage - last_tire_mileage if last_tire_mileage > 0 else current_mileage
-    tire_status = "CLEAR"
+    # Miles accumulated toward the Provider's reimbursement threshold
+    provider_sop_delta = current_mileage - last_provider_tire_mileage if last_provider_tire_mileage > 0 else current_mileage
 
-    if tire_delta >= tire_target:
-        tire_status = "REPLACE_DUE"
-        tire_line = f"• Tires: 🔴 {tire_delta:,}m on set ({prov_name} Pay Threshold Reached @ {tire_target:,}m)"
-    elif tire_delta >= tire_early_alert:
+    # B. Physical Safety Clock: Check latest recorded tread depth across any corner
+    min_tread_depth = 10
+    for l in logs:
+        for pos_key in ('tread_df', 'tread_pf', 'tread_dr', 'tread_pr'):
+            raw_depth = l.get(pos_key, 0)
+            if raw_depth and int(raw_depth) > 0:
+                min_tread_depth = min(min_tread_depth, int(raw_depth))
+
+    # Evaluate statuses independently
+    tire_status = "CLEAR"
+    if min_tread_depth <= 3:
+        tire_status = "TREAD_CRITICAL"
+        tire_line = f"• Tires: 🚨 Physical Tread Critical ({min_tread_depth}/32\" — Ground/Replace)"
+    elif provider_sop_delta >= tire_target:
+        tire_status = "PROVIDER_DUE"
+        tire_line = f"• Tires: 🔴 {provider_sop_delta:,}m on provider clock ({prov_name} Pay Due @ {tire_target:,}m)"
+    elif min_tread_depth <= 4:
+        tire_status = "TREAD_WARNING"
+        tire_line = f"• Tires: ⚠️ Physical Tread Low ({min_tread_depth}/32\" — Replace Soon)"
+    elif provider_sop_delta >= tire_early_alert:
         tire_status = "PROVIDER_WINDOW"
-        tire_line = f"• Tires: 🟡 {tire_delta:,}m on set (Eligible for {prov_name} Pay @ {tire_target:,}m)"
+        tire_line = f"• Tires: 🟡 {provider_sop_delta:,}m on provider clock (Eligible for {prov_name} Pay @ {tire_target:,}m)"
     else:
-        tire_line = f"• Tires: 🟢 {tire_delta:,}m on set ({tire_target - tire_delta:,}m to {tire_target:,}m SOP)"
+        tire_line = f"• Tires: 🟢 {tire_target - provider_sop_delta:,}m to {tire_target:,}m {prov_name} Pay (Min Tread: {min_tread_depth}/32\")"
 
     # 3. Brakes (Vendor-Specific Lifecycle Check)
     last_brake_mileage = 0
@@ -171,22 +190,27 @@ def evaluate_vehicle_health(vehicle_data: Dict[Any, Any], db_manager) -> Dict[st
 
 def get_tire_position_telemetry(vehicle_id: str, current_mileage: int, db_manager) -> Dict[str, Any]:
     """
-    Parses historical logs to calculate:
-    1. Provider SOP: Odometer delta since last install (15,000 mi threshold for reimbursement).
-    2. Physical Wear: Latest measured tread depth (32nds) per wheel position with datestamp and invoice.
+    Parses historical logs using the Two-Clock Tire Model:
+    1. Provider SOP Reimbursement Clock:
+       Accumulates miles toward the 15k threshold. ONLY resets when payment_route == 'Provider'.
+       Out-of-pocket replacements do NOT reset this clock.
+    2. Physical Tire Clock:
+       Tracks the actual tire currently on the hub (physical miles on tire, tread depth, install date).
+       Resets whenever a new tire is mounted (Out of Pocket OR Provider).
     """
     positions = {
-        'DF': {'name': 'Driver Front (Steer L)', 'last_mileage': None, 'date': 'N/A', 'invoice': 'N/A', 'depth': None},
-        'PF': {'name': 'Passenger Front (Steer R)', 'last_mileage': None, 'date': 'N/A', 'invoice': 'N/A', 'depth': None},
-        'DR': {'name': 'Driver Rear (Drive L)', 'last_mileage': None, 'date': 'N/A', 'invoice': 'N/A', 'depth': None},
-        'PR': {'name': 'Passenger Rear (Drive R)', 'last_mileage': None, 'date': 'N/A', 'invoice': 'N/A', 'depth': None},
+        'DF': {'name': 'Driver Front (Steer L)', 'last_provider_m': None, 'last_physical_m': None, 'install_date': 'N/A', 'install_route': 'Factory', 'depth': None, 'depth_date': 'N/A'},
+        'PF': {'name': 'Passenger Front (Steer R)', 'last_provider_m': None, 'last_physical_m': None, 'install_date': 'N/A', 'install_route': 'Factory', 'depth': None, 'depth_date': 'N/A'},
+        'DR': {'name': 'Driver Rear (Drive L)', 'last_provider_m': None, 'last_physical_m': None, 'install_date': 'N/A', 'install_route': 'Factory', 'depth': None, 'depth_date': 'N/A'},
+        'PR': {'name': 'Passenger Rear (Drive R)', 'last_provider_m': None, 'last_physical_m': None, 'install_date': 'N/A', 'install_route': 'Factory', 'depth': None, 'depth_date': 'N/A'},
     }
 
     clean_uid = vehicle_id.split('_')[-1]
     with db_manager.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT mileage, date, tire_positions, invoice_num, tread_df, tread_pf, tread_dr, tread_pr
+            SELECT mileage, date, tire_positions, invoice_num, payment_route, service_type,
+                   tread_df, tread_pf, tread_dr, tread_pr
             FROM service_logs 
             WHERE (vehicle_id = ? OR vehicle_id = ?) 
               AND service_type LIKE '%Tire%'
@@ -199,72 +223,89 @@ def get_tire_position_telemetry(vehicle_id: str, current_mileage: int, db_manage
     for row in logs:
         log_mil = row['mileage'] or 0
         log_date = row['date'] or 'N/A'
-        log_inv = row['invoice_num'] or 'N/A'
         pos_str = str(row['tire_positions'] or '').upper()
+        st = str(row['service_type'] or '').lower()
+        pr = str(row['payment_route'] or '').lower()
+        is_replacement = ('replacement' in st) or ('replaced' in st) or ('new tire' in st)
 
         for pos in ('DF', 'PF', 'DR', 'PR'):
-            if pos in pos_str and positions[pos]['last_mileage'] is None:
-                positions[pos]['last_mileage'] = log_mil
-                positions[pos]['date'] = log_date
-                positions[pos]['invoice'] = log_inv
+            if pos in pos_str:
+                # 1. Provider SOP Clock: ONLY resets if Provider paid for it
+                if is_replacement and pr == 'provider' and positions[pos]['last_provider_m'] is None:
+                    positions[pos]['last_provider_m'] = log_mil
+
+                # 2. Physical Tire Clock: Resets on ANY replacement (Out of Pocket or Provider)
+                if is_replacement and positions[pos]['last_physical_m'] is None:
+                    positions[pos]['last_physical_m'] = log_mil
+                    positions[pos]['install_date'] = log_date
+                    positions[pos]['install_route'] = 'Provider Paid' if pr == 'provider' else 'Out of Pocket'
+
+                # 3. Physical Tread Depth: Latest measurement (Audit or Replacement)
                 raw_d = row[depth_map[pos]] if depth_map[pos] in row.keys() else 0
                 if raw_d and positions[pos]['depth'] is None:
-                    positions[pos]['depth'] = raw_d
+                    positions[pos]['depth'] = int(raw_d)
+                    positions[pos]['depth_date'] = log_date
+
+    # Resolve active vendor SOP rule
+    with db_manager.get_connection() as conn:
+        v_cur = conn.cursor()
+        v_cur.execute("SELECT provider FROM master_vehicles WHERE vehicle_id = ? OR vehicle_id LIKE ?", (vehicle_id, f"%_{clean_uid}"))
+        v_row = v_cur.fetchone()
+        prov_tag = v_row['provider'] if v_row else 'Other'
+
+    from utils.provider_sop import get_sop_for_provider
+    v_sop = get_sop_for_provider(prov_tag, db_manager)
+    t_target = int(v_sop.get('tire_reimburse_miles', 15000))
+    t_early = max(0, t_target - int(v_sop.get('tire_warning_window', 1000)))
 
     results = {}
     for pos, data in positions.items():
-        last_m = data['last_mileage']
-        if last_m is not None:
-            miles_on_tire = max(0, current_mileage - last_m)
-            sop_installed_str = f"Installed: {data['date']} @ {last_m:,} mi"
-        else:
-            miles_on_tire = current_mileage
-            sop_installed_str = "Factory / Pre-tracking"
+        # A. Provider Reimbursement Clock Math
+        last_prov = data['last_provider_m']
+        sop_miles = max(0, current_mileage - last_prov) if last_prov is not None else current_mileage
 
-        # 1. Dynamic Vendor SOP Reimbursement Status
-        with db_manager.get_connection() as conn:
-            v_cur = conn.cursor()
-            v_cur.execute("SELECT provider FROM master_vehicles WHERE vehicle_id = ? OR vehicle_id LIKE ?", (vehicle_id, f"%_{clean_uid}"))
-            v_row = v_cur.fetchone()
-            prov_tag = v_row['provider'] if v_row else 'Other'
-
-        v_sop = get_sop_for_provider(prov_tag, db_manager)
-        t_target = int(v_sop.get('tire_reimburse_miles', 15000))
-        t_early = max(0, t_target - int(v_sop.get('tire_warning_window', 1000)))
-
-        if miles_on_tire >= t_target:
+        if sop_miles >= t_target:
             sop_badge = f"🔴 {prov_tag} Pay Due ({t_target // 1000}k+)"
             sop_color = "#F38BA8"
-        elif miles_on_tire >= t_early:
+        elif sop_miles >= t_early:
             sop_badge = f"🟡 {prov_tag} Window ({t_early // 1000}k+)"
             sop_color = "#F9E2AF"
         else:
-            sop_badge = f"🟢 {t_target - miles_on_tire:,}m to {t_target // 1000}k SOP"
+            sop_badge = f"🟢 {t_target - sop_miles:,}m to {t_target // 1000}k SOP"
             sop_color = "#A6E3A1"
 
-        # 2. Physical Tread Depth Status
+        # B. Physical Tire Wear Math
+        last_phys = data['last_physical_m']
+        physical_miles = max(0, current_mileage - last_phys) if last_phys is not None else current_mileage
+
         depth_val = data['depth'] if data['depth'] is not None else 10
         if depth_val <= 3:
-            depth_badge = f"🚨 {depth_val}/32\" — Replace Immediately"
+            depth_badge = f"🚨 {depth_val}/32\" — Replace"
             depth_color = "#F38BA8"
         elif depth_val <= 4:
-            depth_badge = f"⚠️ {depth_val}/32\" — Warning (Replace Soon)"
+            depth_badge = f"⚠️ {depth_val}/32\" — Warning"
             depth_color = "#F9E2AF"
         else:
-            depth_badge = f"🟢 {depth_val}/32\" — Operational"
+            depth_badge = f"🟢 {depth_val}/32\" — OK"
             depth_color = "#A6E3A1"
+
+        # C. Metadata string showing install type
+        if data['last_physical_m'] is not None:
+            install_info = f"{data['install_date']} ({data['install_route']})"
+        else:
+            install_info = "Pre-tracking / Initial"
 
         results[pos] = {
             'label': data['name'],
-            'miles_on_tire': miles_on_tire,
-            'sop_installed_str': sop_installed_str,
+            'sop_miles': sop_miles,
             'sop_badge': sop_badge,
             'sop_color': sop_color,
             'tread_depth': depth_val,
             'depth_badge': depth_badge,
             'depth_color': depth_color,
-            'date': data['date'],
-            'invoice': data['invoice']
+            'physical_miles': physical_miles,
+            'install_info': install_info,
+            'meta_str': f"Tire: {install_info} | Checked: {data['depth_date']}"
         }
     return results
 

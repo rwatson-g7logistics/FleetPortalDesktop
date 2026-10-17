@@ -158,7 +158,7 @@ class ServiceFormView(QWidget):
 
         core_layout.addWidget(svc_types_frame)
 
-        # Row C: Vendor & Invoice Details
+        # Row C: Vendor, Location & Invoice Details
         row_c = QHBoxLayout()
         row_c.addWidget(QLabel("Vendor / Shop:"))
         self.cmb_vendor = QComboBox()
@@ -167,11 +167,25 @@ class ServiceFormView(QWidget):
         self.cmb_vendor.setStyleSheet("background-color: #313244; color: #CDD6F4; border-radius: 6px; padding-left: 8px;")
         row_c.addWidget(self.cmb_vendor, stretch=2)
 
+        row_c.addWidget(QLabel("Location / Address:"))
+        self.txt_location = QLineEdit()
+        self.txt_location.setPlaceholderText("Shop address or On-Route location")
+        self.txt_location.setFixedHeight(35)
+        self.txt_location.setStyleSheet("background-color: #313244; color: #CDD6F4; border-radius: 6px; padding-left: 8px;")
+        row_c.addWidget(self.txt_location, stretch=2)
+
         row_c.addWidget(QLabel("Invoice #:"))
         self.txt_invoice = QLineEdit()
         self.txt_invoice.setFixedHeight(35)
         self.txt_invoice.setStyleSheet("background-color: #313244; color: #CDD6F4; border-radius: 6px; padding-left: 8px;")
         row_c.addWidget(self.txt_invoice, stretch=1)
+
+        row_c.addWidget(QLabel("Cost Type:"))
+        self.cmb_payment_route = QComboBox()
+        self.cmb_payment_route.addItems(["Provider", "Out of Pocket", "Insurance", "Warranty"])
+        self.cmb_payment_route.setFixedHeight(35)
+        self.cmb_payment_route.setStyleSheet("background-color: #313244; color: #CDD6F4; border-radius: 6px; padding-left: 8px;")
+        row_c.addWidget(self.cmb_payment_route, stretch=1)
 
         row_c.addWidget(QLabel("Total Cost ($):"))
         self.spin_cost = QDoubleSpinBox()
@@ -180,13 +194,6 @@ class ServiceFormView(QWidget):
         self.spin_cost.setFixedHeight(35)
         self.spin_cost.setStyleSheet("background-color: #313244; color: #CDD6F4; border-radius: 6px; padding-left: 8px;")
         row_c.addWidget(self.spin_cost, stretch=1)
-
-        row_c.addWidget(QLabel("Payment Route:"))
-        self.cmb_payment_route = QComboBox()
-        self.cmb_payment_route.addItems(["Provider", "Out of Pocket", "Insurance"])
-        self.cmb_payment_route.setFixedHeight(35)
-        self.cmb_payment_route.setStyleSheet("background-color: #313244; color: #CDD6F4; border-radius: 6px; padding-left: 8px;")
-        row_c.addWidget(self.cmb_payment_route, stretch=1)
 
         core_layout.addLayout(row_c)
         layout.addWidget(grp_core)
@@ -443,6 +450,7 @@ class ServiceFormView(QWidget):
             "service_type": svc_type_str,
             "mileage": self.spin_mileage.value(),
             "vendor": self.cmb_vendor.currentText(),
+            "location": self.txt_location.text().strip() or "Commercial Shop",
             "invoice_num": invoice,
             "cost": self.spin_cost.value(),
             "payment_route": self.cmb_payment_route.currentText() if hasattr(self, 'cmb_payment_route') else "Provider",
@@ -485,18 +493,24 @@ class ServiceFormView(QWidget):
             self.service_logged.emit(self.vehicle.get('vehicle_id', ''))
             return
 
-        # 4. Upload to Google Drive with Direct Feedback into FPD/Service Reports
-        upload_ok, drive_link, upload_err = upload_file_to_drive_sync(
+        # 4. Upload to Google Drive: Unit Records / <vehicle_id> / Service / ShopRepairs
+        from cloud_sync import upload_unit_file_to_drive_sync
+        target_vid = str(v_dict.get('vehicle_id', '') or safe_vid)
+
+        upload_ok, drive_link, upload_err = upload_unit_file_to_drive_sync(
             local_filepath=local_pdf_path,
             drive_filename=pdf_filename,
-            subfolder_name=SUBFOLDER_SERVICE_REPORTS
+            vehicle_id=target_vid,
+            sub_category="Service/ShopRepairs"
         )
 
         if upload_ok:
             QMessageBox.information(
                 self, "Sync Complete",
-                f"✅ Service record logged and uploaded to Google Drive!\n\n"
-                f"File: {pdf_filename}\nLink: {drive_link}"
+                f"✅ Commercial service record saved & uploaded!\n\n"
+                f"File: {pdf_filename}\n"
+                f"Drive Folder: Unit Records / {target_vid} / Service / ShopRepairs\n"
+                f"Link: {drive_link}"
             )
         else:
             QMessageBox.warning(
@@ -506,4 +520,4 @@ class ServiceFormView(QWidget):
                 f"Local copy preserved at:\n{local_pdf_path}"
             )
 
-        self.service_logged.emit(self.vehicle.get('vehicle_id', ''))
+        self.service_logged.emit(target_vid)

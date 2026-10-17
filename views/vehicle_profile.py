@@ -30,6 +30,8 @@ from utils.profile_card_builder import build_specs_card, build_telemetry_card
 from cloud_sync import upload_file_to_drive_sync, retire_unit_cloud
 from config import SUBFOLDER_PAVE
 
+from views.maintenance_table import MaintenanceHistoryWidget
+
 
 class RetireUnitDialog(QDialog):
     """Modal dialog to retire a unit with digital signature, final mileage, and PAVE outtake."""
@@ -409,71 +411,14 @@ class VehicleProfileView(QWidget):
         cards_layout.addWidget(card_status, stretch=1)
         main_layout.addLayout(cards_layout)
 
-        # --- 3. RECENT MAINTENANCE LOGS TABLE ---
-        lbl_history = QLabel("Maintenance & Service History")
-        lbl_history.setFont(QFont(get_default_font_family(), 13, QFont.Weight.Bold))
-        lbl_history.setStyleSheet("color: #CDD6F4; margin-top: 6px;")
+        # --- 3. UNIFIED INTERACTIVE MAINTENANCE TABLE ---
+        lbl_history = QLabel("Maintenance History (Double-click any record to open Report/Slip)")
+        lbl_history.setFont(QFont(get_default_font_family(), 12, QFont.Weight.Bold))
+        lbl_history.setStyleSheet("color: #89B4FA; margin-top: 6px;")
         main_layout.addWidget(lbl_history)
 
-        self.table = QTableWidget()
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["Date", "Service Performed", "Mileage", "Vendor", "Cost"])
-        
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
-        
-        self.table.setColumnWidth(0, 110)
-        self.table.setColumnWidth(2, 110)
-        self.table.setColumnWidth(3, 160)
-        self.table.setColumnWidth(4, 100)
-
-        self.table.verticalHeader().setVisible(False)
-        self.table.setStyleSheet("""
-            QTableWidget {
-                background-color: #1E1E2E;
-                color: #CDD6F4;
-                gridline-color: #313244;
-                border: 1px solid #313244;
-                border-radius: 8px;
-            }
-            QHeaderView::section {
-                background-color: #181825;
-                color: #89B4FA;
-                padding: 8px;
-                font-weight: bold;
-                border: none;
-                border-right: 1px solid #313244;
-            }
-        """)
-
-        self.populate_service_history()
-        main_layout.addWidget(self.table, stretch=1)
-
-    def populate_service_history(self) -> None:
-        """Populates localized SQLite service records or renders an empty placeholder."""
-        if not self.service_history:
-            self.table.setRowCount(1)
-            item = QTableWidgetItem("No localized maintenance logs recorded for this unit.")
-            item.setForeground(QColor("#A6ADC8"))
-            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(0, 1, item)
-            return
-
-        self.table.setRowCount(len(self.service_history))
-        for row_idx, log in enumerate(self.service_history):
-            self.table.setItem(row_idx, 0, QTableWidgetItem(str(log.get('date', ''))))
-            self.table.setItem(row_idx, 1, QTableWidgetItem(str(log.get('service_type', ''))))
-
-            mil = log.get('mileage', 0)
-            self.table.setItem(row_idx, 2, QTableWidgetItem(f"{mil:,} mi" if str(mil).isdigit() else ""))
-            self.table.setItem(row_idx, 3, QTableWidgetItem(str(log.get('vendor', ''))))
-
-            cost_item = QTableWidgetItem(f"${log.get('cost', 0.0):.2f}")
-            cost_item.setForeground(QColor("#A6E3A1"))
-            self.table.setItem(row_idx, 4, cost_item)
+        self.history_widget = MaintenanceHistoryWidget(self.db, self.vehicle_id, parent=self)
+        main_layout.addWidget(self.history_widget, stretch=1)
 
     def print_single_qr(self) -> None:
         """Generates and exports an isolated QR label for this specific vehicle."""

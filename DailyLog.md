@@ -4,6 +4,7 @@
 
 - [ ] User session timeout and role-based signature verification.
 - [ ] Decouple `views/vehicle_profile.py` layout into `utils/profile_card_builder.py`.
+- [ ] StepDeck / Box Truck DOT Inspection Framework: Plan the annual/periodic DOT inspection compliance badge and datestamp tracking for commercial trucks.
 - [ ] Streamline `views/service_view.py` to route invoice attachments into `Unit Records / <vehicle_id> / Invoices`.
 
 ## End of Day (EOD) Build Summary — October 16, 2026

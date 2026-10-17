@@ -382,7 +382,7 @@ def restore_unit_from_retirement(vehicle_id: str, new_return_date: str, doc_link
         worksheet, _ = get_or_create_fpd_sheet(service, client)
         restored_row = [
             unit_num, prov, 'Active', 'Clear', 'WNC4', 'No',
-            make, model, year, vin, plate, state, mil, doc_link, '', '', 'Standard', 7500, new_return_date
+            make, model, year, vin, plate, state, mil, doc_link, '', '', new_return_date, 'Standard'
         ]
         worksheet.append_row(restored_row)
 
@@ -442,7 +442,7 @@ def update_cloud_vehicle_mileage(vehicle_id: str, new_mileage: int) -> Tuple[boo
             df = db.get_all_vehicles()
             match = df[(df['vehicle_id'] == vehicle_id) | (df['vehicle_id'].str.endswith(f"_{raw_uid}"))]
             if not match.empty:
-                v_data = match.iloc[0].to_dict()
+                v_data = {str(k): v for k, v in match.iloc[0].items()}
                 v_data['mileage'] = int(new_mileage)
                 ok, _, err = sync_unit_to_fpd_sheet(v_data)
                 if ok:
@@ -473,8 +473,8 @@ def update_cloud_return_date(vehicle_id: str, new_return_date: str) -> Tuple[boo
         if not cell:
             return False, f"Unit {vehicle_id} not found in FPD_Master_Sheet."
 
-        # Return_Date is Column 19 (Column S)
-        worksheet.update_cell(cell.row, 19, new_return_date)
+        # Return_Date is Column 17 (Column S)
+        worksheet.update_cell(cell.row, 17, new_return_date)
         return True, ""
     except Exception as e:
         return False, str(e)
@@ -517,7 +517,7 @@ def update_cloud_compliance_docs(
             df = db.get_all_vehicles()
             match = df[(df['vehicle_id'] == vehicle_id) | (df['vehicle_id'].str.endswith(f"_{raw_uid}"))]
             if not match.empty:
-                v_data = match.iloc[0].to_dict()
+                v_data = {str(k): v for k, v in match.iloc[0].items()}
                 if registration is not None:
                     v_data['registration'] = registration
                 if insurance is not None:
@@ -535,7 +535,7 @@ def update_cloud_compliance_docs(
         if insurance is not None:
             worksheet.update_cell(target_row_idx, 16, str(insurance))
         if return_date is not None:
-            worksheet.update_cell(target_row_idx, 19, str(return_date))
+            worksheet.update_cell(target_row_idx, 17, str(return_date))
 
         return True, ""
     except Exception as e:
@@ -582,7 +582,7 @@ FLEET_SHEET_HEADERS = [
     "Unit_ID", "Provider", "Status", "Restrictions", "Location",
     "Camera Status", "Make", "Model", "Year", "VIN",
     "Plate", "State", "Mileage", "PAVE_Insp", "Registration",
-    "Insurance", "Size", "Service_Interval", "Return_Date"
+    "Insurance", "Return_Date", "Size"
 ]
 
 
@@ -618,6 +618,15 @@ def get_or_create_fpd_sheet(service: Any, client: gspread.Client) -> Tuple[gspre
         except gspread.WorksheetNotFound:
             worksheet = spreadsheet.sheet1
             worksheet.update_title("MasterSheet")
+        # Auto-purge legacy 'Service_Interval' column from live Google Sheet if present
+        try:
+            header_row = worksheet.row_values(1)
+            if "Service_Interval" in header_row:
+                col_to_drop = header_row.index("Service_Interval") + 1
+                worksheet.delete_columns(col_to_drop)
+                worksheet.update([FLEET_SHEET_HEADERS], f"A1:{chr(ord('A') + len(FLEET_SHEET_HEADERS) - 1)}1")
+        except Exception as e:
+            print(f"[SHEET CLEANUP NOTICE] Column purge check: {e}")
     else:
         # 2. Create brand-new Google Sheet directly inside the isolated folder
         file_metadata = {
@@ -692,7 +701,7 @@ def push_unsynced_vehicles_to_cloud(db_manager) -> Tuple[int, str]:
     except Exception as e:
         return 0, str(e)
 
-def sync_unit_to_fpd_sheet(unit_data: Dict[str, Any]) -> Tuple[bool, str, str]:
+def sync_unit_to_fpd_sheet(unit_data: Dict[Any, Any]) -> Tuple[bool, str, str]:
     """
     Appends a new unit record to the FPD Master Google Sheet.
     Creates the sheet and headers if they do not exist.
@@ -726,9 +735,9 @@ def sync_unit_to_fpd_sheet(unit_data: Dict[str, Any]) -> Tuple[bool, str, str]:
             str(unit_data.get('pave_insp', '')),
             str(unit_data.get('registration', '')),
             str(unit_data.get('insurance', '')),
-            str(unit_data.get('size', 'L')),
-            int(unit_data.get('service_interval', 7500)),
-            str(unit_data.get('return_date', ''))
+            str(unit_data.get('return_date', '')),
+            str(unit_data.get('size', 'L'))
+
         ]
 
         worksheet.append_row(row)
@@ -964,12 +973,29 @@ class SyncWorker(QThread):
         self.db = db_manager
 
     def run(self) -> None:
-        # Actively test session validity and attempt silent token refresh on startup
+        """Actively reconciles local SQLite cache with Google Sheets on application startup."""
         creds = get_gcp_credentials(interactive=False)
-        if creds and creds.valid:
-            self.sync_finished.emit(True, "Cloud Sync: Up to Date")
-        else:
+        if not creds or not creds.valid:
             self.sync_finished.emit(False, "Session Expired (Click to Connect)")
+            return
+
+        try:
+            # 1. Push any offline-created local vehicles upstream first
+            push_unsynced_vehicles_to_cloud(self.db)
+
+            # 2. Pull authoritative cloud fleet
+            success, cloud_df, err = pull_fpd_master_sheet()
+            if success:
+                if not cloud_df.empty:
+                    self.db.replace_all_vehicles(cloud_df)
+                    self.vehicles_loaded.emit(len(cloud_df))
+                self.sync_finished.emit(True, "Cloud Sync: Up to Date")
+            else:
+                print(f"[STARTUP SYNC WARNING] Could not pull cloud master: {err}")
+                self.sync_finished.emit(True, "Local Cache Active (Cloud Pull Failed)")
+        except Exception as e:
+            print(f"[STARTUP SYNC ERROR] {e}")
+            self.sync_finished.emit(False, f"Sync error: {e}")
 
 
 class PushWorker(QThread):

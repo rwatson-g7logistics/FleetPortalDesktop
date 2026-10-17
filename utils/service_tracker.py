@@ -1,18 +1,18 @@
 """
 utils/service_tracker.py
 ------------------------
-Multi-point maintenance and compliance tracking engine for G7 Fleet Portal Desktop.
+Multi-point maintenance and compliance tracking engine for a Fleet Portal Desktop edition.
 Evaluates engine oil delta, 15,000-mile tire reimbursement eligibility, brake life,
 and chassis alignment flags. Generates composite status badges and detailed tooltips.
 """
 
 from typing import Dict, Any, List, Tuple
 
-# impoerts from Utis 
+# imports from Utils
 from utils.provider_sop import get_sop_for_provider
 
 
-def evaluate_vehicle_health(vehicle_data: Dict[str, Any], db_manager) -> Dict[str, Any]:
+def evaluate_vehicle_health(vehicle_data: Dict[Any, Any], db_manager) -> Dict[str, Any]:
     """
     Evaluates comprehensive vehicle maintenance telemetry across 4 subsystems:
     1. Oil / Scheduled PM: Odometer delta against service_interval (7500 / 5000).

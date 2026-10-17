@@ -219,12 +219,15 @@ class AddUnitDialog(QDialog):
         self.txt_vin = QLineEdit()
         self.txt_vin.setMaxLength(17)
         self.txt_vin.setPlaceholderText("17-Character VIN")
+        self.txt_vin.textChanged.connect(lambda t: self.txt_vin.setText(t.upper()) if t != t.upper() else None)
 
         self.txt_plate = QLineEdit()
         self.txt_plate.setPlaceholderText("License Plate #")
+        self.txt_plate.textChanged.connect(lambda t: self.txt_plate.setText(t.upper()) if t != t.upper() else None)
 
         self.txt_state = QLineEdit()
         self.txt_state.setPlaceholderText("State (e.g. NC)")
+        self.txt_state.textChanged.connect(lambda t: self.txt_state.setText(t.upper()) if t != t.upper() else None)
 
         self.cmb_cam = QComboBox()
         self.cmb_cam.addItems(["No", "Yes"])
@@ -438,6 +441,13 @@ class AddUnitDialog(QDialog):
                 f"VIN must be exactly 17 characters.\n\nCurrent length: {len(vin)} characters\nEntered: '{vin}'"
             )
             return
+        if vin.startswith('00'):
+            QMessageBox.warning(
+                self,
+                "Invalid VIN",
+                f"VIN cannot begin with '00'. Please enter a valid 17-character VIN.\n\nEntered: '{vin}'"
+            )
+            return
 
         # --- 3. DUPLICATE VALIDATION SAFEGUARDS (UNIT ID, VIN, PLATE) ---
         existing_df = self.db.get_all_vehicles()
@@ -543,16 +553,15 @@ class AddUnitDialog(QDialog):
             'size': self.cmb_size.currentText().strip(),
             'year': self.txt_year.text().strip(),
             'vin': vin,
-            'plate': self.txt_plate.text().strip(),
-            'state': self.txt_state.text().strip(),
+            'plate': self.txt_plate.text().strip().upper(),
+            'state': self.txt_state.text().strip().upper(),
             'camera_status': self.cmb_cam.currentText(),
             'registration': self.txt_reg.text().strip(),
             'insurance': self.txt_ins.text().strip(),
             'return_date': self.txt_ret.text().strip(),
             'pave_insp': pave_cloud_link,
             'status': 'Active',
-            'mileage': self.spin_intake_mileage.value(),
-            'service_interval': oil_interval
+            'mileage': self.spin_intake_mileage.value()
         }
 
         # --- 7. SAVE TO LOCAL SQLITE CACHE & SYNC TO CLOUD SHEET ---
@@ -962,7 +971,7 @@ class FleetView(QWidget):
             ins_val = str(row_data.get('insurance', ''))
 
             # Multi-point Service Status Tracking (Oil, Tires, Brakes, Alignment)
-            health_eval = evaluate_vehicle_health(row_data.to_dict(), self.db)
+            health_eval = evaluate_vehicle_health({str(k): v for k, v in row_data.items()}, self.db)
             svc_status = health_eval['badge']
             svc_color = health_eval['color']
             svc_tooltip = health_eval['tooltip']

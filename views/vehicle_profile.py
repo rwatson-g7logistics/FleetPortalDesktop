@@ -26,6 +26,7 @@ from utils.pave import generate_pave_pdf
 from utils.provider_sop import get_sop_for_provider
 from utils.qr_helper import export_grid_to_pdf, clean_vin
 from utils.rental_lifecycle import evaluate_rental_compliance
+from utils.profile_card_builder import build_specs_card, build_telemetry_card
 from cloud_sync import upload_file_to_drive_sync, retire_unit_cloud
 from config import SUBFOLDER_PAVE
 
@@ -269,7 +270,7 @@ class VehicleProfileView(QWidget):
         super().__init__(parent)
         self.db = db_manager
         self.vehicle_id = str(vehicle_id)
-        self.vehicle_data: Dict[str, Any] = {}
+        self.vehicle_data: Dict[Any, Any] = {}
         self.service_history: List[Dict[str, Any]] = []
 
         self.load_data()
@@ -298,7 +299,7 @@ class VehicleProfileView(QWidget):
                     (df['vehicle_id'].astype(str).str.endswith(f"_{clean_num}"))
                 ]
                 if not match.empty:
-                    self.vehicle_data = match.iloc[0].to_dict()
+                    self.vehicle_data = {str(k): v for k, v in match.iloc[0].items()}
                 else:
                     self.vehicle_data = {
                         "vehicle_id": self.vehicle_id,
@@ -400,104 +401,11 @@ class VehicleProfileView(QWidget):
         cards_layout = QHBoxLayout()
         cards_layout.setSpacing(16)
 
-        # Left Card: Core Specifications
-        card_specs = QFrame()
-        card_specs.setStyleSheet("background-color: #1E1E2E; border-radius: 10px; border: 1px solid #313244;")
-        specs_grid = QGridLayout(card_specs)
-        specs_grid.setContentsMargins(18, 16, 18, 16)
-        specs_grid.setVerticalSpacing(10)
-        specs_grid.setHorizontalSpacing(16)
-
-        lbl_specs = QLabel("Vehicle Specifications")
-        lbl_specs.setFont(QFont(get_default_font_family(), 12, QFont.Weight.Bold))
-        lbl_specs.setStyleSheet("color: #89B4FA; border: none; padding-bottom: 4px;")
-        specs_grid.addWidget(lbl_specs, 0, 0, 1, 2)
-
-        make_model = f"{self.vehicle_data.get('make', '')} {self.vehicle_data.get('model', '')}".strip() or "Unknown"
-        spec_fields = [
-            ("Provider / Type:", f"{prov} ({self.vehicle_data.get('unit_type', 'Fleet')})"),
-            ("Make / Model:", make_model),
-            ("Model Year:", str(self.vehicle_data.get('year', 'N/A'))),
-            ("Vehicle Size:", str(self.vehicle_data.get('size', 'Standard'))),
-            ("VIN Number:", str(self.vehicle_data.get('vin', 'N/A'))),
-            ("License Plate:", f"{self.vehicle_data.get('plate', 'N/A')} ({self.vehicle_data.get('state', '')})"),
-            ("Camera Installed:", str(self.vehicle_data.get('camera_status', 'No')))
-        ]
-
-        for i, (k_text, v_text) in enumerate(spec_fields, start=1):
-            lbl_k = QLabel(k_text)
-            lbl_k.setStyleSheet("color: #A6ADC8; font-weight: bold; border: none;")
-            lbl_v = QLabel(str(v_text))
-            lbl_v.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            lbl_v.setStyleSheet("color: #CDD6F4; font-size: 13px; border: none;")
-            specs_grid.addWidget(lbl_k, i, 0)
-            specs_grid.addWidget(lbl_v, i, 1)
+        # Assemble specifications and operational telemetry cards via profile_card_builder
+        card_specs = build_specs_card(self.vehicle_data)
+        card_status = build_telemetry_card(self.vehicle_data, self.db)
 
         cards_layout.addWidget(card_specs, stretch=1)
-
-        # Right Card: Operational Telemetry & Compliance
-        card_status = QFrame()
-        card_status.setStyleSheet("background-color: #1E1E2E; border-radius: 10px; border: 1px solid #313244;")
-        status_grid = QGridLayout(card_status)
-        status_grid.setContentsMargins(18, 16, 18, 16)
-        status_grid.setVerticalSpacing(10)
-        status_grid.setHorizontalSpacing(16)
-
-        lbl_status_header = QLabel("Operational Telemetry & Status")
-        lbl_status_header.setFont(QFont(get_default_font_family(), 12, QFont.Weight.Bold))
-        lbl_status_header.setStyleSheet("color: #89B4FA; border: none; padding-bottom: 4px;")
-        status_grid.addWidget(lbl_status_header, 0, 0, 1, 2)
-
-        # Mileage & PM interval calculation
-        raw_mil = str(self.vehicle_data.get('mileage', 0)).replace(',', '').split('.')[0]
-        mileage = int(raw_mil) if raw_mil.isdigit() else 0
-        raw_last_a = str(self.vehicle_data.get('last_a_service', 0)).replace(',', '').split('.')[0]
-        last_a = int(raw_last_a) if raw_last_a.isdigit() else 0
-        prov_sop = get_sop_for_provider(prov, self.db)
-        interval = int(prov_sop.get('oil_pm_interval', 7500))
-
-        diff = mileage - last_a
-        if diff >= interval:
-            pm_text = f"🔴 {diff - interval:,}m Overdue"
-        elif diff >= (interval - 500):
-            pm_text = f"🟡 {interval - diff:,}m Due Soon"
-        else:
-            pm_text = f"🟢 {interval - diff:,}m Remaining"
-
-        ret_date_str = str(self.vehicle_data.get('return_date', '')).strip()
-        is_rental = (self.vehicle_data.get('unit_type') == 'Temp') or (prov in ["U-Haul", "Budget", "Enterprise", "LMR", "Hertz"])
-        if is_rental and ret_date_str:
-            eval_res = evaluate_rental_compliance(ret_date_str)
-            ret_display = f"{ret_date_str} ({eval_res['badge']})"
-        else:
-            ret_display = ret_date_str if ret_date_str else "N/A (Fleet Permanent)"
-
-        status_fields = [
-            ("Roster Status:", str(self.vehicle_data.get('status', 'Active'))),
-            ("Operating Base:", str(self.vehicle_data.get('location', 'WNC4'))),
-            ("Current Odometer:", f"{mileage:,} mi"),
-            ("Service Schedule:", pm_text),
-            ("Registration:", str(self.vehicle_data.get('registration', 'Clear'))),
-            ("Insurance Card:", str(self.vehicle_data.get('insurance', 'Clear'))),
-            ("Return Schedule:", ret_display)
-        ]
-
-        for i, (k_text, v_text) in enumerate(status_fields, start=1):
-            lbl_k = QLabel(k_text)
-            lbl_k.setStyleSheet("color: #A6ADC8; font-weight: bold; border: none;")
-            lbl_v = QLabel(str(v_text))
-            lbl_v.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-
-            if "Overdue" in v_text or "Expired" in v_text:
-                lbl_v.setStyleSheet("color: #F38BA8; font-weight: bold; font-size: 13px; border: none;")
-            elif "Due Soon" in v_text or "Due Tomorrow" in v_text:
-                lbl_v.setStyleSheet("color: #F9E2AF; font-weight: bold; font-size: 13px; border: none;")
-            else:
-                lbl_v.setStyleSheet("color: #CDD6F4; font-size: 13px; border: none;")
-
-            status_grid.addWidget(lbl_k, i, 0)
-            status_grid.addWidget(lbl_v, i, 1)
-
         cards_layout.addWidget(card_status, stretch=1)
         main_layout.addLayout(cards_layout)
 
